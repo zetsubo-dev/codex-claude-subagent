@@ -1,0 +1,35 @@
+{
+  "name": "codex-claude-subagent-workspace",
+  "version": "0.3.0",
+  "private": true,
+  "description": "Local Codex marketplace and development wrapper for Codex–Claude Subagent.",
+  "license": "MIT",
+  "scripts": {
+    "deps:install": "pnpm install --frozen-lockfile",
+    "build": "pnpm --filter codex-claude-subagent build",
+    "check:contract": "node scripts/contract-check.mjs",
+    "validate:plugin": "python3 \"$HOME/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py\" plugins/codex-claude-subagent",
+    "check:plugin": "pnpm --filter codex-claude-subagent check",
+    "format": "oxfmt --write .",
+    "format:check": "oxfmt --check .",
+    "lint": "oxlint . --deny-warnings",
+    "lint:fix": "oxlint . --fix",
+    "check": "pnpm run check:contract && pnpm run validate:plugin && pnpm run format:check && pnpm run lint && pnpm run check:plugin",
+    "test": "pnpm --filter codex-claude-subagent test",
+    "smoke": "pnpm --filter codex-claude-subagent smoke",
+    "smoke:package": "pnpm --filter codex-claude-subagent smoke:package",
+    "smoke:live": "CODEX_CLAUDE_SUBAGENT_RUN_LIVE=1 pnpm --filter codex-claude-subagent smoke:live --",
+    "verify": "pnpm run check && pnpm test && pnpm run smoke:package",
+    "release:package": "pnpm run build && pnpm run verify && node scripts/package-release.mjs",
+    "plugin:cachebuster": "python3 \"$HOME/.codex/skills/.system/plugin-creator/scripts/update_plugin_cachebuster.py\" plugins/codex-claude-subagent",
+    "plugin:install": "codex plugin add codex-claude-subagent@codex-claude-subagent"
+  },
+  "devDependencies": {
+    "oxfmt": "0.61.0",
+    "oxlint": "1.76.0"
+  },
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "packageManager": "pnpm@11.10.0"
+}

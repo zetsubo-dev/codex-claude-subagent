@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "codex_claude_subagent": {
+      "command": "node",
+      "args": ["./server.bundle.mjs"],
+      "cwd": ".",
+      "startup_timeout_sec": 20,
+      "tool_timeout_sec": 1860
+    }
+  }
+}

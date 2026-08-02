@@ -1,0 +1,16 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "env": {
+    "node": true,
+    "es2022": true
+  },
+  "plugins": ["node", "promise"],
+  "ignorePatterns": ["**/node_modules/**", "**/server.bundle.mjs", "**/.serena/**"],
+  "categories": {
+    "correctness": "error",
+    "suspicious": "error"
+  },
+  "options": {
+    "reportUnusedDisableDirectives": "error"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "name": "codex-claude-subagent",
+  "version": "0.3.0+codex.20260802005242",
+  "description": "Use interactive Claude Code as a role-controlled subagent from Codex via MCP.",
+  "license": "MIT",
+  "author": {
+    "name": "zetsubo"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Codex\u2013Claude Subagent",
+    "shortDescription": "Use Claude Code as a subagent from Codex.",
+    "longDescription": "Codex\u2013Claude Subagent exposes local MCP tools for AI agents to start and control interactive Claude Code sessions. Read-only roles explore and review without edits; the implementer role edits and runs checks only in a required dedicated worktree. Sessions support exact resume, request-level completion through hooks, waiting, long-log paging, listing, and stopping. Model and effort values can be passed through to Claude Code when specified.",
+    "developerName": "zetsubo",
+    "category": "Developer Tools",
+    "capabilities": ["Interactive", "Read", "Review", "Implement"],
+    "defaultPrompt": [
+      "Use Codex\u2013Claude Subagent to review this change",
+      "Ask Codex\u2013Claude Subagent for a second opinion",
+      "Ask Codex\u2013Claude Subagent to re-review my fixes"
+    ],
+    "brandColor": "#D97706"
+  },
+  "mcpServers": "./.mcp.json"
+}

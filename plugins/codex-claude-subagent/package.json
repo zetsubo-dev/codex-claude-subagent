@@ -1,0 +1,36 @@
+{
+  "name": "codex-claude-subagent",
+  "version": "0.3.0",
+  "description": "Local MCP server that lets AI agents orchestrate role-controlled interactive Claude Code sessions.",
+  "keywords": [
+    "agent",
+    "claude",
+    "code-review",
+    "codex",
+    "mcp"
+  ],
+  "license": "MIT",
+  "author": "zetsubo",
+  "type": "commonjs",
+  "main": "server.bundle.mjs",
+  "scripts": {
+    "build": "node scripts/build-bundle.mjs",
+    "start": "node server.bundle.mjs",
+    "check": "pnpm run check:bundle && node --check server.bundle.mjs && python3 -c \"compile(open('scripts/pty_bridge.py', encoding='utf-8').read(), 'scripts/pty_bridge.py', 'exec')\"",
+    "check:bundle": "node scripts/check-bundle.mjs",
+    "smoke": "node scripts/smoke.mjs",
+    "smoke:package": "node scripts/package-smoke.mjs",
+    "smoke:live": "node scripts/live-smoke.mjs",
+    "test": "node scripts/lib.test.mjs && node scripts/check-bundle.test.mjs && node scripts/test.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.1"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

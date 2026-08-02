@@ -1,0 +1,22 @@
+node_modules/
+.DS_Store
+.serena/
+
+# Package-manager and runtime logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.log
+
+# Local build/test output
+coverage/
+.cache/
+.tmp/
+dist/
+*.tsbuildinfo
+
+# Local environment files
+.env
+.env.*
+!.env.example

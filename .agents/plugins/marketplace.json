@@ -1,0 +1,20 @@
+{
+  "name": "codex-claude-subagent",
+  "interface": {
+    "displayName": "Codex–Claude Subagent"
+  },
+  "plugins": [
+    {
+      "name": "codex-claude-subagent",
+      "source": {
+        "source": "local",
+        "path": "./plugins/codex-claude-subagent"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}
