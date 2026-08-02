@@ -1,8 +1,8 @@
 # Codex–Claude Subagent
 
-A Codex plugin that lets the Codex desktop app or Codex CLI use Claude Code as
-a subagent through a real interactive session backed by the user's
-`claude.ai` subscription.
+An MCP plugin for the Codex desktop app and Codex CLI that uses interactive
+Claude Code sessions as role-controlled subagents for exploration, code review,
+and implementation.
 
 Sessions remain observable and resumable from Codex. The plugin does not use
 the Claude API, `claude -p`, API-key billing, or nested agents.
@@ -19,12 +19,9 @@ subscription.
 
 The easiest way to install the plugin in the Codex desktop app is:
 
-1. [Open the latest GitHub Release](https://github.com/zetsubo-dev/codex-claude-subagent/releases/latest)
-   and download the versioned ZIP from **Assets**.
+1. [Download the distribution ZIP from the latest GitHub Release](https://github.com/zetsubo-dev/codex-claude-subagent/releases/latest)
 2. Double-click the downloaded release ZIP file to extract it.
-3. Open the extracted folder and double-click `Install.command`.
-4. When Codex opens the plugin installation page, select **Install** for
-   `Codex–Claude Subagent`.
+3. Open the extracted folder and double-click `Install.command` to install the plugin.
 
 If macOS blocks the installer the first time, right-click `Install.command`,
 choose **Open**, and confirm.
@@ -59,6 +56,9 @@ Specify the model and reasoning effort in the same request when needed:
 
 The requested model and effort are passed through to Claude Code. If you omit
 either value, Claude Code uses its own default.
+
+If this plugin is useful to you, please consider giving the repository a star.
+It helps others discover the project and supports further development.
 
 ## License
 

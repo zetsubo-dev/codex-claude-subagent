@@ -32,4 +32,4 @@ else
 fi
 
 open "codex://plugins/?marketplacePath=${marketplace_url}"
-print "Codex plugin installation opened. Select Install for Codex–Claude Subagent."
+print "Codex–Claude Subagent installation completed."
