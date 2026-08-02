@@ -131,7 +131,6 @@ const CONTROLLED_CLAUDE_ARG_FLAGS = new Set([
   "--disallowed-tools",
   "--mcp-config",
   "--strict-mcp-config",
-  "--worktree",
 ]);
 const FORWARDED_CLAUDE_ARG_FLAGS = new Map([
   ["-d", { values: 1, optional: true }],
@@ -152,10 +151,9 @@ const REVIEW_ONLY_BOUNDARY = `Review-only boundary:
 - Follow the target project's CLAUDE.md and configured MCP guidance.
 - Return findings, evidence, and suggested fixes for Codex to apply.`;
 const IMPLEMENTATION_BOUNDARY = `Implementation boundary:
-- Use the dedicated Claude Code Git worktree selected by --worktree for all intended edits and checks.
+- Use the target project directory provided as cwd for all intended edits and checks.
 - You may create, modify, delete, and format files there, and run the project's tests and checks.
-- The Git worktree separates normal repository changes but is not an OS-level filesystem sandbox; do not use absolute paths or change directories outside it.
-- Do not commit, push, or publish changes.
+- Changes are made directly in the provided project directory, matching normal Claude Code behavior.
 - Follow the target project's CLAUDE.md and configured MCP guidance.
 - Return the changed files, commands and tests run, results, and any remaining issues for Codex to inspect and integrate.`;
 const MCP_PRESETS = {
@@ -224,10 +222,10 @@ const ROLE_PROFILES = {
   },
   implementer: {
     mode: "implementation",
-    purpose: "Implement a requested change and run relevant checks in a dedicated worktree.",
+    purpose: "Implement a requested change directly in the target project and run relevant checks.",
     mutatesFiles: true,
-    requiresWorktree: true,
-    filesystemIsolation: "git_worktree_not_os_sandbox",
+    requiresWorktree: false,
+    filesystemIsolation: "none",
     tools: IMPLEMENTER_BUILTIN_TOOLS,
     allowedTools: IMPLEMENTER_ALLOWED_TOOLS,
     disallowedTools: [],
@@ -624,7 +622,7 @@ function readHookFileGeneration(filePath) {
 
 function requireAbsoluteExistingDirectory(cwd) {
   if (!cwd || typeof cwd !== "string") {
-    throw new Error("cwd is required and must be an absolute path to the target project or worktree.");
+    throw new Error("cwd is required and must be an absolute path to the target project directory.");
   }
   if (!path.isAbsolute(cwd)) {
     throw new Error(`cwd must be absolute: ${cwd}`);
@@ -883,9 +881,6 @@ function assertSafeOverrides(input) {
   }
 
   if (READ_ONLY_ROLES.has(role)) {
-    if (input.claude_worktree) {
-      throw new Error(`claude_worktree is not allowed for read-only role '${role}'.`);
-    }
     if (input.permission_mode && input.permission_mode !== profile.permissionMode) {
       throw new Error(`permission_mode '${input.permission_mode}' is not allowed for read-only role '${role}'.`);
     }
@@ -900,10 +895,6 @@ function assertSafeOverrides(input) {
       throw new Error(`Tool permission '${invalidPermissionOverride}' is not allowed for read-only role '${role}'.`);
     }
     return;
-  }
-
-  if (IMPLEMENTATION_ROLES.has(role) && !input.claude_worktree) {
-    throw new Error("claude_worktree is required for the implementer role so file changes stay isolated.");
   }
 }
 
@@ -998,7 +989,6 @@ function buildInteractiveArgs(input, hookRuntime) {
   pushCsvArg(args, "--allowedTools", resolvedAllowedTools);
   pushCsvArg(args, "--disallowedTools", resolvedDisallowedTools);
   if (mcpSettings.config.path) args.push("--strict-mcp-config", "--mcp-config", mcpSettings.config.path);
-  if (input.claude_worktree) args.push("--worktree", input.claude_worktree);
   if (input.claude_args?.length) args.push(...input.claude_args);
 
   return {
@@ -1024,7 +1014,6 @@ function buildInteractiveArgs(input, hookRuntime) {
       mutates_files: profile.mutatesFiles,
       requires_worktree: profile.requiresWorktree,
       filesystem_isolation: profile.filesystemIsolation,
-      claude_worktree: input.claude_worktree || null,
       claude_args: input.claude_args || [],
       completion_transport: hookRuntime ? "claude_code_hooks_with_marker_fallback" : "completion_marker",
     },
@@ -2090,9 +2079,6 @@ async function startInteractiveClaude(rawInput) {
   if (input.mcp_preset === "none") {
     requiredCapabilities.push("mcp_config", "strict_mcp_config");
   }
-  if ((input.role || "reviewer") === "implementer") {
-    requiredCapabilities.push("worktree");
-  }
   for (const capability of requiredCapabilities) {
     if (!claudeInfo.capabilities[capability]) {
       throw new Error(
@@ -2259,11 +2245,11 @@ const permissionModeEnum = z.enum(["dontAsk", "plan"]);
 const mcpPresetEnum = z.enum(["auto", "none", "serena", "context7", "serena_context7"]);
 
 const interactiveSessionInput = {
-  cwd: z.string().describe("Absolute path to the target project or worktree."),
+  cwd: z.string().describe("Absolute path to the target project directory."),
   role: roleEnum
     .default("reviewer")
     .describe(
-      "Role contract: explorer/reviewer/security_reviewer/critic/architect are read-only; implementer is instructed to work in a required dedicated claude_worktree. This is a Git worktree boundary, not OS-level filesystem confinement. Model and effort defaults remain with Claude Code unless explicitly provided.",
+      "Role contract: explorer/reviewer/security_reviewer/critic/architect are read-only; implementer edits the target project directly through cwd. Model and effort defaults remain with Claude Code unless explicitly provided.",
     ),
   model: z
     .string()
@@ -2316,12 +2302,6 @@ const interactiveSessionInput = {
       "Resume an exact Codex–Claude Subagent session UUID previously saved for this cwd and role. Pass explicit model and effort values to change models while preserving the Claude conversation.",
     ),
   continue_latest: z.boolean().default(false).describe("Deprecated and rejected. Resume an exact saved UUID instead."),
-  claude_worktree: z
-    .string()
-    .optional()
-    .describe(
-      "Required for role=implementer; forbidden for read-only roles. Claude Code --worktree name for isolation.",
-    ),
   cols: z.number().int().min(40).max(300).default(120).describe("PTY columns."),
   rows: z.number().int().min(10).max(100).default(40).describe("PTY rows."),
 };
@@ -2336,7 +2316,7 @@ server.registerTool(
   {
     title: "Start Interactive Claude Code",
     description:
-      "Start an interactive Claude Code subagent. Read-only roles (explorer, reviewer, security_reviewer, critic, architect) investigate and report without edits; implementer is instructed to edit and test in the required claude_worktree, which is a Git worktree boundary rather than OS-level filesystem confinement. Preflights Claude subscription authentication and supports exact saved UUID resume.",
+      "Start an interactive Claude Code subagent. Read-only roles (explorer, reviewer, security_reviewer, critic, architect) investigate and report without edits; implementer edits and tests directly in the target cwd. Preflights Claude subscription authentication and supports exact saved UUID resume.",
     inputSchema: interactiveSessionInput,
   },
   async (input) => textResult(await startInteractiveClaude(input)),
@@ -2348,7 +2328,7 @@ server.registerTool(
     title: "Send To Interactive Claude Code",
     description: "Paste text into a live interactive Claude Code PTY session, optionally submitting it.",
     inputSchema: {
-      cwd: z.string().describe("Absolute path to the same target project or worktree."),
+      cwd: z.string().describe("Absolute path to the same target project directory."),
       interactive_id: z.string().min(1).describe("Interactive session id from claude_interactive_start."),
       text: z.string().describe("Text to send to Claude Code."),
       submit: z.boolean().default(true).describe("Whether to press Enter after sending text."),
@@ -2385,7 +2365,7 @@ server.registerTool(
     description:
       "Submit one correlated Claude Code turn and wait for its Stop/StopFailure hook, with a completion-marker fallback. Idle and timeout returns remain resumable by request id.",
     inputSchema: {
-      cwd: z.string().describe("Absolute path to the same target project or worktree."),
+      cwd: z.string().describe("Absolute path to the same target project directory."),
       interactive_id: z.string().min(1).describe("Interactive session id from claude_interactive_start."),
       text: z.string().describe("Request text to send to Claude Code."),
       timeout_ms: z
@@ -2490,7 +2470,7 @@ server.registerTool(
     description:
       "Continue waiting for a previously submitted Claude Code request by request id. Use after an idle or timeout return instead of sending a second request.",
     inputSchema: {
-      cwd: z.string().describe("Absolute path to the same target project or worktree."),
+      cwd: z.string().describe("Absolute path to the same target project directory."),
       interactive_id: z.string().min(1).describe("Interactive session id from claude_interactive_start."),
       request_id: z.string().min(1).describe("Request id returned by claude_interactive_request."),
       timeout_ms: z
@@ -2579,7 +2559,7 @@ server.registerTool(
     description:
       "Wait for new interactive Claude Code output, a pattern, idle period, exit, or timeout. This avoids fixed polling sleeps from Codex.",
     inputSchema: {
-      cwd: z.string().describe("Absolute path to the same target project or worktree."),
+      cwd: z.string().describe("Absolute path to the same target project directory."),
       interactive_id: z.string().min(1).describe("Interactive session id from claude_interactive_start."),
       since_seq: z.number().int().nonnegative().default(0).describe("Watch output chunks after this sequence number."),
       until_pattern: z
@@ -2633,7 +2613,7 @@ server.registerTool(
     title: "Read Interactive Claude Code",
     description: "Read recent output from an interactive Claude Code PTY session.",
     inputSchema: {
-      cwd: z.string().describe("Absolute path to the same target project or worktree."),
+      cwd: z.string().describe("Absolute path to the same target project directory."),
       interactive_id: z.string().min(1).describe("Interactive session id from claude_interactive_start."),
       since_seq: z
         .number()
@@ -2684,7 +2664,7 @@ server.registerTool(
     description:
       "Read persisted interactive Claude Code terminal output by byte offset or tail window. Use this to recover long responses that do not fit in output_tail.",
     inputSchema: {
-      cwd: z.string().describe("Absolute path to the same target project or worktree."),
+      cwd: z.string().describe("Absolute path to the same target project directory."),
       interactive_id: z.string().min(1).describe("Interactive session id from claude_interactive_start."),
       offset: z
         .number()
@@ -2728,7 +2708,7 @@ server.registerTool(
     title: "List Interactive Claude Code Sessions",
     description: "List live or recently exited interactive Claude Code PTY sessions in this MCP server process.",
     inputSchema: {
-      cwd: z.string().describe("Absolute project/worktree cwd. Global cross-project listing is not supported."),
+      cwd: z.string().describe("Absolute project directory cwd. Global cross-project listing is not supported."),
       include_output: z.boolean().default(false),
     },
   },
@@ -2761,7 +2741,7 @@ server.registerTool(
     description:
       "List persisted Codex–Claude Subagent session records, including Claude Code session IDs that can be resumed with claude_interactive_start.resume_claude_session_id.",
     inputSchema: {
-      cwd: z.string().describe("Absolute project/worktree cwd. Global cross-project listing is not supported."),
+      cwd: z.string().describe("Absolute project directory cwd. Global cross-project listing is not supported."),
       limit: z.number().int().positive().max(200).default(50).describe("Maximum saved session records to return."),
     },
   },
@@ -2782,7 +2762,7 @@ server.registerTool(
     title: "Stop Interactive Claude Code",
     description: "Terminate an interactive Claude Code PTY session.",
     inputSchema: {
-      cwd: z.string().describe("Absolute path to the same target project or worktree."),
+      cwd: z.string().describe("Absolute path to the same target project directory."),
       interactive_id: z.string().min(1).describe("Interactive session id from claude_interactive_start."),
       signal: z
         .enum(["SIGTERM", "SIGINT", "SIGHUP"])
@@ -2859,8 +2839,8 @@ server.registerTool(
         read_only_roles: [...READ_ONLY_ROLES],
         implementation_roles: [...IMPLEMENTATION_ROLES],
         read_only_roles_mutate_files: false,
-        implementer_requires_claude_worktree: true,
-        implementer_filesystem_isolation: "git_worktree_not_os_sandbox",
+        implementer_requires_claude_worktree: false,
+        implementer_filesystem_isolation: "none",
         nested_subagents: false,
         request_boundary: "injected_by_role",
         forwards_allowlisted_interactive_claude_args: true,

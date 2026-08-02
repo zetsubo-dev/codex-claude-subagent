@@ -552,17 +552,11 @@ assert(info.mcp_presets.default_read_only === "auto", "read-only MCP preset defa
 assert(Object.hasOwn(info.roles, "implementer"), "implementer role was not exposed");
 assert(info.roles.implementer.mode === "implementation", "implementer mode was not reported");
 assert(info.roles.implementer.mutates_files === true, "implementer mutability was not reported");
-assert(info.roles.implementer.requires_worktree === true, "implementer worktree requirement was not reported");
-assert(
-  info.roles.implementer.filesystem_isolation === "git_worktree_not_os_sandbox",
-  "implementer filesystem isolation contract was not reported",
-);
+assert(info.roles.implementer.requires_worktree === false, "implementer worktree requirement was not disabled");
+assert(info.roles.implementer.filesystem_isolation === "none", "implementer direct project contract was not reported");
 assert(info.policy.caller === "ai_agent", "machine caller policy was not reported");
-assert(info.policy.implementer_requires_claude_worktree === true, "implementer worktree policy was not reported");
-assert(
-  info.policy.implementer_filesystem_isolation === "git_worktree_not_os_sandbox",
-  "implementer filesystem isolation policy was not reported",
-);
+assert(info.policy.implementer_requires_claude_worktree === false, "implementer worktree policy was not disabled");
+assert(info.policy.implementer_filesystem_isolation === "none", "implementer direct project policy was not reported");
 assert(info.policy.nested_subagents === false, "nested subagent policy was not reported");
 assert(info.policy.effort_passthrough === true, "effort pass-through policy was not reported");
 assert(Array.isArray(info.policy.forwarded_claude_arg_flags), "forwarded Claude argument policy was not reported");
@@ -899,25 +893,6 @@ assert(
 await apiAuthenticated.client.close();
 activeClients.delete(apiAuthenticated.client);
 
-let unsafeWorktreeResult;
-try {
-  unsafeWorktreeResult = await client.callTool({
-    name: "claude_interactive_start",
-    arguments: {
-      cwd: projectDir,
-      role: "reviewer",
-      claude_worktree: "review-worktree",
-    },
-  });
-} catch (error) {
-  unsafeWorktreeResult = { isError: true, content: [{ text: error.message }] };
-}
-assert(unsafeWorktreeResult?.isError === true, "reviewer role accepted claude_worktree");
-assert(
-  String(unsafeWorktreeResult.content?.[0]?.text || "").includes("claude_worktree"),
-  "unsafe worktree rejection did not explain the constraint",
-);
-
 let unsafeToolResult;
 try {
   unsafeToolResult = await client.callTool({
@@ -1037,28 +1012,12 @@ const forwardedClaudeArgStop = parseToolResult(
 );
 assert(forwardedClaudeArgStop.stop.exited === true, "forwarded-argument session did not exit after stop");
 
-let missingImplementerWorktree;
-try {
-  missingImplementerWorktree = await client.callTool({
-    name: "claude_interactive_start",
-    arguments: { cwd: projectDir, role: "implementer" },
-  });
-} catch (error) {
-  missingImplementerWorktree = { isError: true, content: [{ text: error.message }] };
-}
-assert(missingImplementerWorktree?.isError === true, "implementer role started without a worktree");
-assert(
-  String(missingImplementerWorktree.content?.[0]?.text || "").includes("required"),
-  "missing implementer worktree rejection did not explain the constraint",
-);
-
 const implementerStart = parseToolResult(
   await client.callTool({
     name: "claude_interactive_start",
     arguments: {
       cwd: projectDir,
       role: "implementer",
-      claude_worktree: "implementation-worktree",
       name: "implementer contract check",
       mcp_preset: "none",
     },
@@ -1068,11 +1027,8 @@ assert(implementerStart.status === "running", "implementer interactive session d
 assert(implementerStart.resolved.role === "implementer", "implementer role was not resolved");
 assert(implementerStart.resolved.mode === "implementation", "implementer mode was not resolved");
 assert(implementerStart.resolved.mutates_files === true, "implementer mutability was not resolved");
-assert(implementerStart.resolved.requires_worktree === true, "implementer worktree requirement was not resolved");
-assert(
-  implementerStart.resolved.claude_worktree === "implementation-worktree",
-  "implementer worktree was not resolved",
-);
+assert(implementerStart.resolved.requires_worktree === false, "implementer worktree requirement was not disabled");
+assert(!Object.hasOwn(implementerStart.resolved, "claude_worktree"), "legacy worktree field was still resolved");
 assert(
   ["Bash", "Read", "Grep", "Glob", "Edit", "Write"].every((tool) => implementerStart.resolved.tools.includes(tool)),
   "implementer did not expose implementation tools",
@@ -1084,18 +1040,15 @@ assert(
   "implementer did not allow implementation tools",
 );
 assert(implementerStart.resolved.permission_mode === "dontAsk", "implementer did not default to dontAsk mode");
-assert(
-  implementerStart.args_preview.includes("--worktree") &&
-    implementerStart.args_preview.includes("implementation-worktree"),
-  "implementer did not pass its dedicated worktree",
-);
+assert(!implementerStart.args_preview.includes("--worktree"), "implementer unexpectedly passed a worktree");
 const implementerInstructionArg = implementerStart.args_preview.indexOf("--append-system-prompt-file");
 assert(implementerInstructionArg >= 0, "implementer instruction was not supplied");
 const implementerInstruction = fs.readFileSync(implementerStart.args_preview[implementerInstructionArg + 1], "utf8");
 assert(
   implementerInstruction.includes("Implementation boundary:") &&
-    implementerInstruction.includes("dedicated Claude Code Git worktree"),
-  "implementer boundary was not appended",
+    implementerInstruction.includes("directly in the provided project directory") &&
+    !implementerInstruction.includes("Do not commit, push, or publish changes."),
+  "implementer direct-project boundary was not appended",
 );
 const implementerStop = parseToolResult(
   await client.callTool({
@@ -1113,25 +1066,24 @@ const noWorktreeInfo = parseToolResult(
   await noWorktreeCapability.client.callTool({ name: "codex_claude_subagent_info", arguments: {} }),
 );
 assert(noWorktreeInfo.claude.capabilities.worktree === false, "worktree-disabled Claude was not detected");
-let unsupportedImplementerStart;
-try {
-  unsupportedImplementerStart = await noWorktreeCapability.client.callTool({
+const noWorktreeImplementerStart = parseToolResult(
+  await noWorktreeCapability.client.callTool({
     name: "claude_interactive_start",
-    arguments: {
-      cwd: projectDir,
-      role: "implementer",
-      claude_worktree: "unsupported-worktree",
-      mcp_preset: "none",
-    },
-  });
-} catch (error) {
-  unsupportedImplementerStart = { isError: true, content: [{ text: error.message }] };
-}
-assert(unsupportedImplementerStart?.isError === true, "implementer started without worktree capability");
-assert(
-  String(unsupportedImplementerStart.content?.[0]?.text || "").includes("worktree"),
-  "worktree capability rejection did not explain the constraint",
+    arguments: { cwd: projectDir, role: "implementer", mcp_preset: "none" },
+  }),
 );
+assert(noWorktreeImplementerStart.status === "running", "implementer required an unused worktree capability");
+assert(
+  !noWorktreeImplementerStart.args_preview.includes("--worktree"),
+  "implementer passed a worktree despite direct project behavior",
+);
+const noWorktreeImplementerStop = parseToolResult(
+  await noWorktreeCapability.client.callTool({
+    name: "claude_interactive_stop",
+    arguments: { cwd: projectDir, interactive_id: noWorktreeImplementerStart.interactive_id },
+  }),
+);
+assert(noWorktreeImplementerStop.stop.exited === true, "direct-project implementer session did not exit after stop");
 await noWorktreeCapability.client.close();
 activeClients.delete(noWorktreeCapability.client);
 

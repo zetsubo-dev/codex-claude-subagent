@@ -43,10 +43,9 @@ as proof that Codex–Claude Subagent initialized.
 
 - Codex remains the orchestrator and final integrator.
 - The caller must choose a role contract. Read-only roles report findings and
-  suggested fixes; Codex applies those changes. The `implementer` role is
-  instructed to edit and run checks in its required dedicated Claude Git
-  worktree, then
-  reports the changed files and verification for Codex to inspect and integrate.
+  suggested fixes; Codex applies those changes. The `implementer` role edits
+  and runs checks directly in the target `cwd`, matching normal Claude Code
+  behavior, then reports the changed files and verification.
 - Claude runs as an interactive Claude Code session in the target `cwd`.
 - The plugin does not bundle or install Claude Code. It launches the `claude`
   executable resolved through the host machine's `PATH` and uses the existing
@@ -221,10 +220,10 @@ context. Stop the session when no re-review will be sent.
 - `security_reviewer`: complex read-only security review.
 - `critic`: complex adversarial second opinion.
 - `architect`: complex design and refactor planning.
-- `implementer`: implementation and verification in a dedicated Claude
-  worktree. Requires `claude_worktree`; defaults to `Edit`, `Write`, `Bash`,
-  `Read`, `Grep`, `Glob`, and `permission_mode: "dontAsk"`. It must not commit,
-  push, or modify files outside that worktree.
+- `implementer`: implementation and verification directly in the target
+  project directory. Defaults to `Edit`, `Write`, `Bash`, `Read`, `Grep`,
+  `Glob`, and `permission_mode: "dontAsk"`. Claude Code retains its normal
+  edit, commit, push, and publish behavior.
 
 When `model` or `effort` is omitted, the plugin passes no corresponding CLI
 option and Claude Code selects its own default from its normal installation,
@@ -234,8 +233,8 @@ validated by the installed Claude Code.
 
 For read-only roles, do not ask Codex–Claude Subagent to implement code changes;
 use Codex for edits, then send the resulting diff back for re-review. Use
-`role: "implementer"` only when the caller explicitly wants Claude to make the
-change in an isolated worktree.
+`role: "implementer"` when the caller wants Claude to make the change in the
+target project directory.
 
 ## Model and Effort Selection
 
@@ -249,31 +248,30 @@ is omitted, Claude Code's own default is used.
 Use `claude_args` for the allowlisted Claude Code interactive flags and values.
 The live policy reports that list. Unknown flags are rejected; so are
 print/non-interactive, background, tmux, Remote Control, nested-agent,
-plugin-loading, output-format, and structured session/permission/worktree flags.
+plugin-loading, output-format, and structured session/permission flags.
 Use the structured fields for `model`, `effort`, `permission_mode`,
-`claude_worktree`, MCP, tools, and session identity instead of repeating those
-flags in `claude_args`.
+MCP, tools, and session identity instead of repeating those flags in
+`claude_args`.
 
 ## Safety Defaults
 
 The MCP contract is explicit in `codex_claude_subagent_info`: read-only roles
 have `mode: "read_only"`, `mutates_files: false`, and `requires_worktree: false`;
 `implementer` has `mode: "implementation"`, `mutates_files: true`, and
-`requires_worktree: true`. The `claude_interactive_start` schema repeats this
+`requires_worktree: false`. The `claude_interactive_start` schema repeats this
 role contract so another AI agent can select a role without relying on prose.
 
 Read-only roles use `Bash`, `Read`, `Grep`, and `Glob` with
 `permission_mode: "plan"` and `mcp_preset: "auto"`. Their boundary is injected
 into the session context and every `claude_interactive_request`; `Edit`,
-`Write`, known nested-agent tools, mutating permission modes, and worktrees are
-rejected as overrides. Bash remains intended for non-mutating inspection only.
+`Write`, known nested-agent tools, and mutating permission modes are rejected as
+overrides. Bash remains intended for non-mutating inspection only.
 
-The implementer boundary is injected in the same way and requires
-`claude_worktree`. It uses `Bash`, `Read`, `Grep`, `Glob`, `Edit`, and `Write`
-with `permission_mode: "dontAsk"`. Its Git worktree is not an OS-level
-filesystem sandbox; commit, push, publish, outside-worktree paths, and
-nested-agent tools remain outside the contract. Claude Code handles the tool
-and permission behavior for the interactive session.
+The implementer boundary is injected in the same way and uses the target `cwd`.
+It uses `Bash`, `Read`, `Grep`, `Glob`, `Edit`, and `Write` with
+`permission_mode: "dontAsk"`. Commit, push, publish, and nested-agent tools
+are governed by Claude Code and the target project's instructions; the plugin
+does not add a worktree or commit/push restriction.
 
 `auto` uses Claude Code's normal user, project, and local MCP discovery. The legacy
 `serena`, `context7`, and `serena_context7` preset names remain aliases for that
@@ -287,8 +285,7 @@ exception for an explicitly MCP-free session, not a recovery step for a normal
 MCP selector. Do not select `none` merely because the startup selector appears.
 
 Override `mcp_preset`, tools, model, or effort only when the selected role's
-contract allows it. Do not override the role boundary or use a worktree with a
-read-only role. `mcp_preset: "none"` is available when the caller explicitly
+contract allows it. Do not override the role boundary. `mcp_preset: "none"` is available when the caller explicitly
 requires an MCP-free session.
 
 ## Handoff Packet
@@ -297,7 +294,7 @@ Use this shape in interactive requests:
 
 ```text
 Goal:
-Repo/worktree:
+Repo/project directory:
 Relevant files:
 Current diff:
 Decisions already made:

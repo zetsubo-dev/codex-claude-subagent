@@ -68,14 +68,18 @@ assertContract(!normalizedDocs.includes("Claude Worker"), "old display name remo
 assertContract(server.includes('name: "codex-claude-subagent"'), "server name");
 assertContract(server.includes("CODEX_CLAUDE_SUBAGENT_STATE_DIR"), "state environment prefix");
 assertContract(server.includes('const IMPLEMENTATION_ROLES = new Set(["implementer"])'), "implementer role contract");
-assertContract(server.includes("claude_worktree is required"), "implementer worktree guard");
+assertContract(!server.includes("claude_worktree is required"), "implementer worktree guard removed");
 assertContract(server.includes("nested_subagents: false"), "nested subagent policy");
 assertContract(server.includes("forwards_allowlisted_interactive_claude_args: true"), "interactive Claude args policy");
 assertContract(fs.existsSync(installer), "release installer missing");
 assertContract((fs.statSync(installer).mode & 0o111) !== 0, "release installer must be executable");
 assertContract(normalizedDocs.includes("claude_args"), "interactive Claude args documentation");
 assertContract(normalizedDocs.includes("role contract"), "machine-readable role contract documentation");
-assertContract(normalizedDocs.includes("implementer_requires_claude_worktree"), "implementer worktree documentation");
+assertContract(
+  normalizedDocs.includes("implementer_requires_claude_worktree"),
+  "implementer worktree status documentation",
+);
+assertContract(normalizedDocs.includes("directly in the target project"), "direct project editing documentation");
 assertContract(!server.includes("CLAUDE_WORKER"), "old environment prefix removed from source");
 assertContract(!bundle.includes("CLAUDE_WORKER"), "old environment prefix removed from bundle");
 assertContract(!bundle.includes("claude_worker"), "old MCP identifier removed from bundle");

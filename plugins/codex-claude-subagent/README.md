@@ -27,7 +27,7 @@ implementation.
 - It does not use `claude -p` or another non-interactive print mode.
 - It does not use Claude API keys or fall back to API billing.
 - It does not expose Claude background agents, tmux, or nested agent/team tools.
-- It does not automatically commit or push changes.
+- It does not override Claude Code's normal edit, commit, push, or publish behavior.
 
 Claude Code must be authenticated through `claude.ai`. The plugin rejects
 API-key or Console authentication before starting a session, so usage is tied
@@ -43,7 +43,7 @@ Codex will report that Claude Code needs authentication.
 
 The caller should first inspect `codex_claude_subagent_info`, then pass the
 appropriate `role` to `claude_interactive_start`.
-The returned `policy.implementer_requires_claude_worktree` field is `true`, and
+The returned `policy.implementer_requires_claude_worktree` field is `false`, and
 the role records expose `mode`, `mutates_files`, `requires_worktree`, and
 `filesystem_isolation`.
 
@@ -54,22 +54,20 @@ the role records expose `mode`, `mutates_files`, `requires_worktree`, and
 | `security_reviewer` | Review security risks. | No | Not required |
 | `critic` | Provide an adversarial second opinion. | No | Not required |
 | `architect` | Propose design and refactoring direction. | No | Not required |
-| `implementer` | Implement a change and run checks. | Yes | Required |
+| `implementer` | Implement a change and run checks in the target project. | Yes | Not used |
 
-Read-only roles use Claude Code's plan mode and reject editing tools, worktrees,
-and nested-agent overrides. The `implementer` role uses `Edit` and `Write` with
-a required dedicated Git worktree. The worktree separates normal repository
-changes, but is not an OS-level filesystem sandbox; the implementation boundary
-forbids absolute-path or outside-worktree changes, commits, pushes, and publish
-operations.
+Read-only roles use Claude Code's plan mode and reject editing tools and
+nested-agent overrides. The `implementer` role uses `Edit`, `Write`, and the
+target project directory supplied as `cwd`, matching normal Claude Code
+behavior. Claude Code retains its normal ability to edit, commit, push, and
+publish according to the target project's instructions and account permissions.
 
 For implementation, the minimum start request is:
 
 ```json
 {
   "cwd": "/absolute/path/to/project",
-  "role": "implementer",
-  "claude_worktree": "codex-implementation"
+  "role": "implementer"
 }
 ```
 
@@ -108,8 +106,8 @@ Other allowlisted Claude Code interactive flags can be passed through
 connection, slash-command disabling, prompt suggestions, and Chrome disabling;
 the live policy reports the exact list. The plugin rejects unknown flags and
 flags that would change the contract: `-p` / print mode, background, tmux,
-Remote Control, nested-agent or plugin loading, permission/session/worktree
-fields managed by the structured request, and output formats intended for
+Remote Control, nested-agent or plugin loading, permission/session fields
+managed by the structured request, and output formats intended for
 non-interactive use.
 
 ## Hosts
@@ -128,8 +126,7 @@ subagent; the plugin does not create nested Claude agents or teams.
 - Codex desktop app or Codex CLI with plugin support
 - Node.js 20 or newer
 - Python 3
-- Claude Code with the interactive, session, and worktree options required by
-  the selected role
+- Claude Code with the interactive and session options required by the selected role
 - An active `claude.ai` subscription login in Claude Code
 
 Linux and Windows are not currently supported because the local PTY bridge is
