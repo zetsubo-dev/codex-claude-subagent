@@ -1,6 +1,6 @@
 {
   "name": "codex-claude-subagent",
-  "version": "0.3.0+codex.20260802061206",
+  "version": "0.3.0+codex.20261110041850524.476d6a",
   "description": "Use interactive Claude Code as a role-controlled subagent from Codex via MCP.",
   "license": "MIT",
   "author": {
@@ -8,16 +8,19 @@
   },
   "skills": "./skills/",
   "interface": {
-    "displayName": "Codex\u2013Claude Subagent",
+    "displayName": "Codex–Claude Subagent",
     "shortDescription": "Use Claude Code as a subagent from Codex.",
-    "longDescription": "Codex\u2013Claude Subagent exposes local MCP tools for AI agents to start and control interactive Claude Code sessions. Read-only roles explore and review without edits; the implementer role edits and runs checks directly in the target project directory. Sessions support exact resume, request-level completion through hooks, waiting, long-log paging, listing, and stopping. Model and effort values can be passed through to Claude Code when specified.",
+    "longDescription": "Codex–Claude Subagent exposes interactive Claude Code sessions through MCP using your claude.ai login. Model and effort requests are passed as structured inputs; omitted values use Claude Code defaults. Sessions use official native lifecycle observation for completion and support exact resume, waiting, log paging, listing, and stopping. Claude runs alone by default; explicitly requested native subagents are available for implementation.",
     "developerName": "zetsubo",
     "category": "Developer Tools",
     "capabilities": ["Interactive", "Read", "Review", "Implement"],
     "defaultPrompt": [
-      "Use Codex\u2013Claude Subagent to review this change",
-      "Ask Codex\u2013Claude Subagent for a second opinion",
-      "Ask Codex\u2013Claude Subagent to re-review my fixes"
+      "Use Codex–Claude Subagent to review this change",
+      "Ask Codex–Claude Subagent for a second opinion",
+      "Ask Codex–Claude Subagent to re-review my fixes",
+      "Have Claude explore this repository using Fable",
+      "Have Claude review this using Opus with high effort, as a single agent",
+      "Have Claude implement this and allow its native subagents"
     ],
     "brandColor": "#D97706"
   },

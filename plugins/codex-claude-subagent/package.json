@@ -21,7 +21,7 @@
     "smoke": "node scripts/smoke.mjs",
     "smoke:package": "node scripts/package-smoke.mjs",
     "smoke:live": "node scripts/live-smoke.mjs",
-    "test": "node scripts/lib.test.mjs && node scripts/check-bundle.test.mjs && node scripts/test.mjs"
+    "test": "node scripts/lib.test.mjs && node scripts/observer.test.mjs && node scripts/check-bundle.test.mjs && node scripts/test.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

@@ -45,6 +45,7 @@ fs.writeFileSync(
   fakeClaude,
   `#!/usr/bin/env node
 const fs = require("node:fs");
+const crypto = require("node:crypto");
 const { spawnSync } = require("node:child_process");
 const args = process.argv.slice(2);
 const supportsSettings = process.env.FAKE_CLAUDE_DISABLE_SETTINGS !== "1";
@@ -63,6 +64,7 @@ if (args.includes("--version")) {
   process.exit(0);
 }
 if (args.includes("--help")) {
+  console.log("  --plugin-dir <path>");
   console.log("Usage: claude [options] [prompt]\\n  --allowedTools\\n" + (supportsMcpConfig ? "  --mcp-config\\n  --strict-mcp-config\\n" : "") + (supportsSettings ? "  --settings <file-or-json>\\n" : "") + "  --setting-sources <sources>\\n  --append-system-prompt-file <path>\\n" + (supportsWorktree ? "  --worktree\\n" : "") + "  --session-id <uuid>\\n  --resume [value]\\n  --continue\\n  --model <model> e.g. 'fable', 'opus', 'sonnet', 'claude-fable-5', or 'claude-opus-4-8'");
   process.exit(0);
 }
@@ -85,8 +87,11 @@ if (Object.keys(process.env).some((name) => sensitiveEnvNames.has(name.toUpperCa
 }
 const authIndex = args.indexOf("auth");
 if (authIndex >= 0 && args[authIndex + 1] === "status") {
+  if (process.env.FAKE_CLAUDE_AUTH_ARGS_LOG) fs.appendFileSync(process.env.FAKE_CLAUDE_AUTH_ARGS_LOG, JSON.stringify(args) + "\\n");
   if (process.env.FAKE_CLAUDE_AUTH_CWD_LOG) fs.appendFileSync(process.env.FAKE_CLAUDE_AUTH_CWD_LOG, process.cwd() + "\\n");
-  const mode = process.env.FAKE_CLAUDE_AUTH_MODE || "max";
+  const sourceIndex = args.indexOf("--setting-sources");
+  const helperActive = process.env.FAKE_CLAUDE_API_KEY_HELPER === "1" && args[sourceIndex + 1] !== "";
+  const mode = helperActive ? "api" : process.env.FAKE_CLAUDE_AUTH_MODE || "max";
   if (mode === "max") {
     console.log(JSON.stringify({ loggedIn: true, authMethod: "claude.ai", apiProvider: "firstParty", subscriptionType: "max" }));
   } else if (mode === "team") {
@@ -112,6 +117,7 @@ if (authIndex >= 0 && args[authIndex + 1] === "status") {
     console.log(JSON.stringify({ loggedIn: true, authMethod: "api_key", apiProvider: "firstParty" }));
   } else {
     console.log(JSON.stringify({ loggedIn: false, authMethod: "none", apiProvider: "firstParty" }));
+    process.exit(1);
   }
   process.exit(0);
 }
@@ -158,7 +164,7 @@ function runHook(eventName, extra) {
       const payload = {
         session_id: fakeSessionId,
         cwd: process.cwd(),
-        permission_mode: "plan",
+        permission_mode: "bypassPermissions",
         hook_event_name: eventName,
         ...(extra || {}),
       };
@@ -175,8 +181,63 @@ function runHook(eventName, extra) {
   }
   return results;
 }
+let nativeSeq = 0;
+let nativeToken = null;
+let nativeTurnId = null;
+if (process.env.FAKE_CLAUDE_OBSERVER_META) fs.writeFileSync(process.env.FAKE_CLAUDE_OBSERVER_META, JSON.stringify({
+  directory: process.env.CODEX_CLAUDE_SUBAGENT_OBSERVER_DIR, generation: process.env.CODEX_CLAUDE_SUBAGENT_OBSERVER_GENERATION, session_id: fakeSessionId,
+}));
+function nativeEvent(kind, extra = {}) {
+  const dir = process.env.CODEX_CLAUDE_SUBAGENT_OBSERVER_DIR;
+  if (!dir || process.env.FAKE_CLAUDE_SKIP_OBSERVER === "1") return;
+  const seq = ++nativeSeq;
+  const event = { schema: 1, seq, generation: process.env.CODEX_CLAUDE_SUBAGENT_OBSERVER_GENERATION,
+    session_id: fakeSessionId, request_token: nativeToken, turn_id: nativeTurnId,
+    kind, at: new Date().toISOString(), ...extra };
+  fs.writeFileSync(dir + "/event-" + String(seq).padStart(8,"0") + ".json", JSON.stringify(event));
+}
+function nativeComplete(extra) {
+  const raw = String(extra.last_assistant_message || "");
+  let answer = raw.slice(0, 64000);
+  const code = answer.charCodeAt(answer.length - 1);
+  if (code >= 0xd800 && code <= 0xdbff) answer = answer.slice(0,-1);
+  if (answer.length < raw.length) answer += "\\n[codex-claude-subagent: response truncated; read terminal log]";
+  const reason = process.env.FAKE_CLAUDE_NATIVE_REASON || "answer";
+  nativeEvent("turn.complete", { reason, is_aborted: reason === "aborted", agent_id: null,
+    answer,
+    answer_truncated: raw.length > 64000,
+    stop: { blocked: process.env.FAKE_CLAUDE_STOP_BLOCKED === "1", prevent_continuation: process.env.FAKE_CLAUDE_PREVENT === "1",
+      background_tasks_pending: process.env.FAKE_CLAUDE_BACKGROUND_PENDING === "unknown" ? null : process.env.FAKE_CLAUDE_BACKGROUND_PENDING === "1" ? 1 : extra.background_tasks?.length || 0,
+      session_crons_pending: process.env.FAKE_CLAUDE_CRON_PENDING === "1" ? 1 : extra.session_crons?.length || 0 },
+    last_api_model: "fake-model", observed: { model: "fake-model", effort: "medium" } });
+}
 function emitHook(eventName, extra) {
   runHook(eventName, extra);
+  if (eventName === "SessionStart") nativeEvent("ready", { version: { version: "2.1.322" } });
+  if (eventName === "UserPromptSubmit") {
+    nativeToken = [...String(extra.prompt || "").matchAll(/Codex–Claude Subagent correlation token:\\s*(CODEX_CLAUDE_SUBAGENT_REQUEST_[a-z0-9_]+)/g)].at(-1)?.[1] || null;
+    nativeTurnId = crypto.randomUUID();
+    nativeEvent("turn.start");
+  }
+  if (eventName === "Stop") {
+    setTimeout(() => nativeComplete(extra), Number(process.env.FAKE_CLAUDE_NATIVE_DELAY_MS || 40));
+    if (process.env.FAKE_CLAUDE_TOKENLESS_WAKE === "1") setTimeout(() => {
+      nativeToken = null;
+      nativeTurnId = crypto.randomUUID();
+      nativeEvent("turn.start");
+      setTimeout(() => nativeComplete({ last_assistant_message: "BACKGROUND_FINISHED" }), 1500);
+    }, 300);
+  }
+}
+if (process.env.FAKE_CLAUDE_STARTUP_DIALOG) {
+  console.log(process.env.FAKE_CLAUDE_STARTUP_DIALOG === "trust" ? "Quick safety check: Is this a project you trust? Yes, I trust this folder" : "Bypass Permissions mode: Yes, I accept");
+  process.stdin.on("data", () => { if (process.env.FAKE_CLAUDE_UNEXPECTED_INPUT) fs.writeFileSync(process.env.FAKE_CLAUDE_UNEXPECTED_INPUT, "received"); });
+  process.stdin.resume();
+  return;
+}
+if (process.env.FAKE_CLAUDE_STARTUP_SELECTOR === "1") {
+  console.log("New MCP servers found. Select any you wish to enable");
+  process.stdin.once("data", () => console.log("\\x1b[2Jfake interactive ready"));
 }
 if (process.env.FAKE_CLAUDE_CAP_OUTPUT === "1") {
   process.stdout.write("123456789012345678🙂TAIL\\n");
@@ -214,6 +275,7 @@ function submittedPrompt() {
   return { prompt: inputBuffer };
 }
 process.stdin.on("data", (data) => {
+  if (process.env.FAKE_CLAUDE_INPUT_LOG) fs.appendFileSync(process.env.FAKE_CLAUDE_INPUT_LOG, data);
   inputBuffer += data;
   if (!helloHandled && hasSubmittedText("hello interactive")) {
     helloHandled = true;
@@ -230,6 +292,7 @@ process.stdin.on("data", (data) => {
       if (inputBuffer.includes("1. CODEX_CLAUDE_SUBAGENT_DONE_") && suffix) {
         console.log("CODEX_CLAUDE_SUBAGENT_DONE_" + suffix);
       }
+      emitHook("Stop", { last_assistant_message: "review complete" });
     }, 100);
   }
   if (!neverHandled && hasSubmittedText("never marker")) {
@@ -447,6 +510,7 @@ function createTestClient(testStateDir, extraEnv = {}) {
     cwd: process.cwd(),
     env: {
       ...process.env,
+      CLAUDE_CONFIG_DIR: path.join(tmpRoot, "claude-config"),
       ANTHROPIC_API_KEY: "must-not-reach-interactive-child",
       ANTHROPIC_AUTH_TOKEN: "must-not-reach-interactive-child",
       ANTHROPIC_BASE_URL: "https://must-not-reach.invalid",
@@ -550,6 +614,10 @@ assert(info.claude.capabilities.effort_passthrough === true, "effort pass-throug
 assert(Array.isArray(info.claude.capabilities.supported_efforts), "supported effort values were not reported");
 assert(info.mcp_presets.default_read_only === "auto", "read-only MCP preset default was not reported");
 assert(Object.hasOwn(info.roles, "implementer"), "implementer role was not exposed");
+assert(
+  Object.values(info.roles).every((role) => role.permissionMode === "bypassPermissions"),
+  "all roles must bypass Claude Code permission prompts",
+);
 assert(info.roles.implementer.mode === "implementation", "implementer mode was not reported");
 assert(info.roles.implementer.mutates_files === true, "implementer mutability was not reported");
 assert(info.roles.implementer.requires_worktree === false, "implementer worktree requirement was not disabled");
@@ -557,7 +625,8 @@ assert(info.roles.implementer.filesystem_isolation === "none", "implementer dire
 assert(info.policy.caller === "ai_agent", "machine caller policy was not reported");
 assert(info.policy.implementer_requires_claude_worktree === false, "implementer worktree policy was not disabled");
 assert(info.policy.implementer_filesystem_isolation === "none", "implementer direct project policy was not reported");
-assert(info.policy.nested_subagents === false, "nested subagent policy was not reported");
+assert(info.policy.nested_subagents === "explicit_only", "explicit subagent policy was not reported");
+assert(info.policy.default_subagent_mode === "disabled", "single-agent default was not reported");
 assert(info.policy.effort_passthrough === true, "effort pass-through policy was not reported");
 assert(Array.isArray(info.policy.forwarded_claude_arg_flags), "forwarded Claude argument policy was not reported");
 assert(!Object.hasOwn(info.roles, "test_runner"), "Bash-capable test_runner role should not be exposed");
@@ -573,6 +642,11 @@ assert(info.policy.model_effort_default_source === "claude_code", "default owner
 
 const tools = await client.listTools();
 const toolNames = tools.tools.map((tool) => tool.name);
+const startSchema = tools.tools.find((tool) => tool.name === "claude_interactive_start").inputSchema;
+assert(
+  JSON.stringify(startSchema.properties.permission_mode.enum) === JSON.stringify(["bypassPermissions"]),
+  "start schema must expose only bypassPermissions",
+);
 for (const expected of [
   "claude_interactive_start",
   "claude_interactive_send",
@@ -893,7 +967,329 @@ assert(
 await apiAuthenticated.client.close();
 activeClients.delete(apiAuthenticated.client);
 
+// Preflight and the launched session must read the same settings sources.
+const helperLog = path.join(tmpRoot, "helper-auth-args.jsonl");
+const helperClient = createTestClient(path.join(tmpRoot, "state-helper"), {
+  FAKE_CLAUDE_API_KEY_HELPER: "1",
+  FAKE_CLAUDE_AUTH_ARGS_LOG: helperLog,
+});
+await helperClient.client.connect(helperClient.transport);
+const helperRejected = await helperClient.client.callTool({
+  name: "claude_interactive_start",
+  arguments: { cwd: plainProjectDir, role: "reviewer", mcp_preset: "auto" },
+});
+assert(helperRejected.isError, "apiKeyHelper was not rejected with active project/user settings");
+const helperNone = parseToolResult(
+  await helperClient.client.callTool({
+    name: "claude_interactive_start",
+    arguments: { cwd: plainProjectDir, role: "reviewer", mcp_preset: "none" },
+  }),
+);
+const helperArgs = fs
+  .readFileSync(helperLog, "utf8")
+  .trim()
+  .split("\n")
+  .map((line) => JSON.parse(line));
+assert(
+  helperArgs.some((args) => args[args.indexOf("--setting-sources") + 1] === "user,project,local"),
+  "normal preflight ignored settings",
+);
+assert(
+  helperArgs.at(-1)[helperArgs.at(-1).indexOf("--setting-sources") + 1] === "",
+  "isolated preflight loaded user settings",
+);
+await helperClient.client.callTool({
+  name: "claude_interactive_stop",
+  arguments: { cwd: plainProjectDir, interactive_id: helperNone.interactive_id },
+});
+await helperClient.client.close();
+activeClients.delete(helperClient.client);
+
+const effortClient = createTestClient(path.join(tmpRoot, "state-effort"), { CLAUDE_CODE_EFFORT_LEVEL: "high" });
+await effortClient.client.connect(effortClient.transport);
+const effortConflict = await effortClient.client.callTool({
+  name: "claude_interactive_start",
+  arguments: { cwd: plainProjectDir, role: "reviewer", effort: "low", mcp_preset: "none" },
+});
+assert(
+  effortConflict.isError && effortConflict.content[0].text.includes("CLAUDE_CODE_EFFORT_LEVEL"),
+  "effort conflict was silently overridden",
+);
+await effortClient.client.close();
+activeClients.delete(effortClient.client);
+
+const delegated = parseToolResult(
+  await client.callTool({
+    name: "claude_interactive_start",
+    arguments: { cwd: plainProjectDir, role: "implementer", subagent_mode: "auto", mcp_preset: "none" },
+  }),
+);
+assert(
+  delegated.resolved.tools.includes("Agent") && !delegated.resolved.disallowed_tools.includes("Agent"),
+  "explicit native delegation was not enabled",
+);
+await client.callTool({
+  name: "claude_interactive_stop",
+  arguments: { cwd: plainProjectDir, interactive_id: delegated.interactive_id },
+});
+for (const args of [
+  { role: "reviewer", subagent_mode: "auto" },
+  { role: "implementer", subagent_mode: "auto", tools: ["Read"] },
+  { role: "implementer", subagent_mode: "auto", disallowed_tools: ["Agent"] },
+  { role: "implementer", subagent_mode: "auto", tools: ["Agent", "SendMessage"] },
+]) {
+  const rejected = await client.callTool({
+    name: "claude_interactive_start",
+    arguments: { cwd: plainProjectDir, ...args },
+  });
+  assert(rejected.isError, "conflicting delegation configuration was silently expanded");
+}
+
+for (const mode of [
+  "trust",
+  "bypass",
+  "missing-observer",
+  "selector",
+  "delayed-native",
+  "background",
+  "unknown-count",
+  "blocked",
+  "cron",
+  "tokenless",
+  "aborted",
+  "error",
+  "refusal",
+  "prevent",
+]) {
+  const inputFile = path.join(tmpRoot, `unexpected-input-${mode}`);
+  const isolated = createTestClient(path.join(tmpRoot, `state-lifecycle-${mode}`), {
+    ...(mode === "trust" || mode === "bypass"
+      ? { FAKE_CLAUDE_STARTUP_DIALOG: mode, FAKE_CLAUDE_UNEXPECTED_INPUT: inputFile }
+      : {}),
+    ...(mode === "missing-observer" ? { FAKE_CLAUDE_SKIP_OBSERVER: "1" } : {}),
+    ...(mode === "selector" ? { FAKE_CLAUDE_STARTUP_SELECTOR: "1" } : {}),
+    ...(mode === "delayed-native" ? { FAKE_CLAUDE_NATIVE_DELAY_MS: "800" } : {}),
+    ...(mode === "background" ? { FAKE_CLAUDE_BACKGROUND_PENDING: "1" } : {}),
+    ...(mode === "unknown-count" ? { FAKE_CLAUDE_BACKGROUND_PENDING: "unknown" } : {}),
+    ...(mode === "blocked" ? { FAKE_CLAUDE_STOP_BLOCKED: "1" } : {}),
+    ...(mode === "tokenless" ? { FAKE_CLAUDE_TOKENLESS_WAKE: "1" } : {}),
+    ...(["aborted", "error", "refusal"].includes(mode) ? { FAKE_CLAUDE_NATIVE_REASON: mode } : {}),
+    ...(mode === "prevent" ? { FAKE_CLAUDE_PREVENT: "1" } : {}),
+    ...(mode === "cron" ? { FAKE_CLAUDE_CRON_PENDING: "1" } : {}),
+  });
+  await isolated.client.connect(isolated.transport);
+  const started = parseToolResult(
+    await isolated.client.callTool({
+      name: "claude_interactive_start",
+      arguments: { cwd: plainProjectDir, role: "reviewer", mcp_preset: "none" },
+    }),
+  );
+  const result = await isolated.client.callTool({
+    name: "claude_interactive_request",
+    arguments: {
+      cwd: plainProjectDir,
+      interactive_id: started.interactive_id,
+      text: "review this",
+      idle_ms: null,
+      timeout_ms: mode === "delayed-native" ? 200 : 2000,
+    },
+  });
+  if (["trust", "bypass", "missing-observer"].includes(mode)) {
+    assert(result.isError, `${mode} startup was treated as ready`);
+    assert(!fs.existsSync(inputFile), `${mode} startup received request or consent bytes`);
+  } else {
+    const response = parseToolResult(result);
+    if (mode === "delayed-native") {
+      assert(!response.request.done, "Stop or completion marker completed before native event");
+      const final = parseToolResult(
+        await isolated.client.callTool({
+          name: "claude_interactive_wait_request",
+          arguments: {
+            cwd: plainProjectDir,
+            interactive_id: started.interactive_id,
+            request_id: response.request.request_id,
+            idle_ms: null,
+            timeout_ms: 2000,
+          },
+        }),
+      );
+      assert(final.request.done, "delayed native completion was not resumable");
+    } else if (mode === "background") {
+      assert(
+        response.request.done && response.request.work_pending && response.request.completion_scope === "main_turn",
+        "background work incorrectly blocked main-turn completion",
+      );
+      const next = await isolated.client.callTool({
+        name: "claude_interactive_send",
+        arguments: {
+          cwd: plainProjectDir,
+          interactive_id: started.interactive_id,
+          text: "next harmless input",
+          submit: false,
+        },
+      });
+      assert(!next.isError, "background count left an input lock after main completion");
+    } else if (mode === "unknown-count") {
+      assert(
+        response.request.done && response.request.count_unknown && !response.request.work_pending,
+        "unknown count blocked completion or claimed known work",
+      );
+    } else if (mode === "blocked") {
+      assert(
+        response.request.done && response.request.stop_block_overridden,
+        "final overridden Stop block held the input lock",
+      );
+    } else if (["aborted", "prevent", "error", "refusal"].includes(mode)) {
+      assert(!response.request.done && !response.request.pending, `${mode} was not terminal`);
+      assert(
+        response.request.status === (["aborted", "prevent"].includes(mode) ? "interrupted" : "failed"),
+        `${mode} terminal mapping incorrect`,
+      );
+    } else if (mode === "tokenless") {
+      let view;
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        view = parseToolResult(
+          await isolated.client.callTool({
+            name: "claude_interactive_read",
+            arguments: { cwd: plainProjectDir, interactive_id: started.interactive_id, max_chars: 100 },
+          }),
+        );
+        if (view.native_active_turn_id) break;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      assert(view.native_active_turn_id, "tokenless turn was not tracked");
+      for (const name of ["claude_interactive_send", "claude_interactive_request"]) {
+        const rejected = await isolated.client.callTool({
+          name,
+          arguments: { cwd: plainProjectDir, interactive_id: started.interactive_id, text: "must not send" },
+        });
+        assert(rejected.isError, "input was accepted during tokenless main turn");
+      }
+      for (let attempt = 0; attempt < 50; attempt += 1) {
+        view = parseToolResult(
+          await isolated.client.callTool({
+            name: "claude_interactive_read",
+            arguments: { cwd: plainProjectDir, interactive_id: started.interactive_id, max_chars: 100 },
+          }),
+        );
+        if (!view.native_active_turn_id) break;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      assert(
+        !view.native_active_turn_id && view.latest_native_outcome?.answer === "BACKGROUND_FINISHED",
+        "tokenless outcome did not clear active turn",
+      );
+      assert(
+        view.last_request.request_id === response.request.request_id &&
+          view.last_request.result_text === "review complete",
+        "tokenless completion changed correlated request",
+      );
+      const unlocked = await isolated.client.callTool({
+        name: "claude_interactive_send",
+        arguments: {
+          cwd: plainProjectDir,
+          interactive_id: started.interactive_id,
+          text: "safe followup",
+          submit: false,
+        },
+      });
+      assert(!unlocked.isError, "tokenless completion left input locked");
+    } else {
+      assert(
+        response.request.done && response.request.completion_transport === "claude_code_mod",
+        `${mode} native completion failed`,
+      );
+    }
+  }
+  await isolated.client.callTool({
+    name: "claude_interactive_stop",
+    arguments: { cwd: plainProjectDir, interactive_id: started.interactive_id },
+  });
+  await isolated.client.close();
+  activeClients.delete(isolated.client);
+}
+
 let unsafeToolResult;
+{
+  const inputLog = path.join(tmpRoot, "retry-guard-input.log");
+  const metadata = path.join(tmpRoot, "retry-guard-observer.json");
+  const guarded = createTestClient(path.join(tmpRoot, "state-retry-guard"), {
+    FAKE_CLAUDE_INPUT_LOG: inputLog,
+    FAKE_CLAUDE_OBSERVER_META: metadata,
+  });
+  await guarded.client.connect(guarded.transport);
+  const started = parseToolResult(
+    await guarded.client.callTool({
+      name: "claude_interactive_start",
+      arguments: { cwd: plainProjectDir, role: "reviewer", mcp_preset: "none" },
+    }),
+  );
+  const waiting = parseToolResult(
+    await guarded.client.callTool({
+      name: "claude_interactive_request",
+      arguments: {
+        cwd: plainProjectDir,
+        interactive_id: started.interactive_id,
+        text: "retry submit request",
+        idle_ms: null,
+        timeout_ms: 100,
+      },
+    }),
+  );
+  assert(waiting.request.pending && !waiting.request.submitted_at, "retry guard fixture was already submitted");
+  const before = fs.readFileSync(inputLog, "utf8");
+  const meta = JSON.parse(fs.readFileSync(metadata, "utf8"));
+  const event = (seq, kind, extra = {}) =>
+    fs.writeFileSync(
+      path.join(meta.directory, `event-${String(seq).padStart(8, "0")}.json`),
+      JSON.stringify({
+        schema: 1,
+        seq,
+        generation: meta.generation,
+        session_id: meta.session_id,
+        kind,
+        turn_id: "tokenless-guard-turn",
+        request_token: null,
+        at: new Date().toISOString(),
+        ...extra,
+      }),
+    );
+  event(2, "turn.start");
+  const retry = () =>
+    guarded.client.callTool({
+      name: "claude_interactive_wait_request",
+      arguments: {
+        cwd: plainProjectDir,
+        interactive_id: started.interactive_id,
+        request_id: waiting.request.request_id,
+        retry_submit: true,
+        idle_ms: null,
+        timeout_ms: 50,
+      },
+    });
+  assert((await retry()).isError, "retry_submit accepted an active tokenless turn");
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert(fs.readFileSync(inputLog, "utf8") === before, "retry_submit wrote Enter during active native turn");
+  event(3, "turn.complete", {
+    reason: "answer",
+    is_aborted: false,
+    answer: "background complete",
+    stop: { background_tasks_pending: 0 },
+  });
+  fs.writeFileSync(path.join(meta.directory, "event-00000004.json"), '{"schema":1');
+  assert((await retry()).isError, "retry_submit accepted incomplete observer state");
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert(fs.readFileSync(inputLog, "utf8") === before, "retry_submit wrote Enter with a partial observer record");
+  const stopped = parseToolResult(
+    await guarded.client.callTool({
+      name: "claude_interactive_stop",
+      arguments: { cwd: plainProjectDir, interactive_id: started.interactive_id },
+    }),
+  );
+  assert(!stopped.native_active_turn_id, "process exit left a native turn active");
+  await guarded.client.close();
+  activeClients.delete(guarded.client);
+}
 try {
   unsafeToolResult = await client.callTool({
     name: "claude_interactive_start",
@@ -1039,7 +1435,11 @@ assert(
   ),
   "implementer did not allow implementation tools",
 );
-assert(implementerStart.resolved.permission_mode === "dontAsk", "implementer did not default to dontAsk mode");
+assert(implementerStart.resolved.permission_mode === "bypassPermissions", "implementer did not bypass permissions");
+assert(
+  implementerStart.args_preview[implementerStart.args_preview.indexOf("--permission-mode") + 1] === "bypassPermissions",
+  "implementer did not pass bypassPermissions to Claude Code",
+);
 assert(!implementerStart.args_preview.includes("--worktree"), "implementer unexpectedly passed a worktree");
 const implementerInstructionArg = implementerStart.args_preview.indexOf("--append-system-prompt-file");
 assert(implementerInstructionArg >= 0, "implementer instruction was not supplied");
@@ -1118,8 +1518,15 @@ assert(
   ["Bash", "Read", "Grep", "Glob"].every((tool) => autoMcpStart.resolved.allowed_tools.includes(tool)),
   "reviewer did not allow ordinary review built-in tools",
 );
-assert(autoMcpStart.resolved.disallowed_tools.length === 0, "auto MCP added an unexpected tool deny");
-assert(autoMcpStart.resolved.permission_mode === "plan", "review role did not default to Claude Code plan mode");
+assert(
+  ["Agent", "Task"].every((tool) => autoMcpStart.resolved.disallowed_tools.includes(tool)),
+  "default single-agent mode did not deny delegation",
+);
+assert(autoMcpStart.resolved.permission_mode === "bypassPermissions", "review role did not bypass permissions");
+assert(
+  autoMcpStart.args_preview[autoMcpStart.args_preview.indexOf("--permission-mode") + 1] === "bypassPermissions",
+  "reviewer did not pass bypassPermissions to Claude Code",
+);
 const autoStop = parseToolResult(
   await client.callTool({
     name: "claude_interactive_stop",
@@ -1172,6 +1579,7 @@ const complexStart = parseToolResult(
       cwd: plainProjectDir,
       role: "architect",
       name: "complex model check",
+      permission_mode: "bypassPermissions",
       mcp_preset: "none",
     },
   }),
@@ -1329,11 +1737,11 @@ const request = parseToolResult(
     },
   }),
 );
-assert(request.request.wait.reason === "pattern", `expected completion marker, got ${request.request.wait.reason}`);
+assert(request.request.wait.reason === "hook", `expected native completion, got ${request.request.wait.reason}`);
 assert(request.request.marker_seen === true, "marker-complete request did not report marker_seen");
 assert(request.request.done === true, "marker-complete request did not report done");
 assert(
-  request.request.terminal_state === "completed_with_marker",
+  request.request.terminal_state === "completed_with_native_event",
   `unexpected terminal state ${request.request.terminal_state}`,
 );
 assert(
@@ -1410,7 +1818,7 @@ assert(
 );
 assert(resumedNoMarker.request.done === true, "wait_request should complete the pending no-marker request");
 assert(
-  resumedNoMarker.request.terminal_state === "completed_with_stop_hook",
+  resumedNoMarker.request.terminal_state === "completed_with_native_event",
   "pending request did not complete through Stop hook",
 );
 
@@ -1467,7 +1875,7 @@ const completedPermissionAttention = parseToolResult(
 );
 assert(completedPermissionAttention.request.done === true, "permission attention request did not reach Stop");
 assert(
-  completedPermissionAttention.request.terminal_state === "completed_with_stop_hook",
+  completedPermissionAttention.request.terminal_state === "completed_with_native_event",
   "permission attention request used a nonterminal transport",
 );
 assert(
@@ -1621,7 +2029,7 @@ await waitForCondition(() => {
   const persisted = registry.sessions.find((session) => session.interactive_id === interactiveStart.interactive_id);
   return (
     persisted?.last_request?.request_id === hardTimeout.request.request_id &&
-    persisted.last_request.terminal_state === "completed_with_stop_hook" &&
+    persisted.last_request.terminal_state === "completed_with_native_event" &&
     persisted.active_request === null
   );
 }, 3000);
@@ -1640,7 +2048,7 @@ const resumedHardTimeout = parseToolResult(
 );
 assert(resumedHardTimeout.request.done === true, "timed-out request did not remain resumable");
 assert(
-  resumedHardTimeout.request.terminal_state === "completed_with_stop_hook",
+  resumedHardTimeout.request.terminal_state === "completed_with_native_event",
   "timed-out request did not eventually complete",
 );
 assert(resumedHardTimeout.request.wait.reason === "hook", "late Stop was not returned as the terminal hook");
@@ -1668,7 +2076,7 @@ assert(
   spamMarker.output_tail.includes(spamMarker.request.completion_marker),
   "high-volume request lost completion marker",
 );
-assert(spamMarker.request.terminal_state === "completed_with_stop_hook", "marker bypassed the Stop hook grace period");
+assert(spamMarker.request.terminal_state === "completed_with_native_event", "marker bypassed native completion");
 assert(spamMarker.request.result_text === "spam complete", "Stop hook grace period lost the authoritative result");
 
 const longPayload = [
@@ -1817,7 +2225,7 @@ assert(longHookResult.request.done === true, "long hook result request did not c
 assert(longHookResult.request.result_text_truncated === true, "long hook result did not report truncation");
 assert(longHookResult.request.result_text.startsWith("RESULT_BEGIN_"), "long hook result lost its prefix");
 assert(
-  longHookResult.request.result_text.includes("[codex-claude-subagent: hook field truncated]"),
+  longHookResult.request.result_text.includes("[codex-claude-subagent: response truncated; read terminal log]"),
   "long hook result lacked a truncation marker",
 );
 assert(!longHookResult.request.result_text.includes("�"), "long hook result split a Unicode character");

@@ -26,7 +26,8 @@ implementation.
 
 - It does not use `claude -p` or another non-interactive print mode.
 - It does not use Claude API keys or fall back to API billing.
-- It does not expose Claude background agents, tmux, or nested agent/team tools.
+- It does not launch background CLI sessions, tmux, or Agent Teams.
+- It runs one Claude agent by default. Native subagents require an explicit request.
 - It does not override Claude Code's normal edit, commit, push, or publish behavior.
 
 Claude Code must be authenticated through `claude.ai`. The plugin rejects
@@ -56,7 +57,11 @@ the role records expose `mode`, `mutates_files`, `requires_worktree`, and
 | `architect` | Propose design and refactoring direction. | No | Not required |
 | `implementer` | Implement a change and run checks in the target project. | Yes | Not used |
 
-Read-only roles use Claude Code's plan mode and reject editing tools and
+All roles start Claude Code with `--permission-mode bypassPermissions`.
+Claude Code's interaction-required tools, organization policy, and protected
+operations can still require attention; bypass does not promise zero dialogs.
+The `permission_mode` input accepts only `bypassPermissions`. Read-only roles
+retain their non-mutating instructions and reject editing tools and
 nested-agent overrides. The `implementer` role uses `Edit`, `Write`, and the
 target project directory supplied as `cwd`, matching normal Claude Code
 behavior. Claude Code retains its normal ability to edit, commit, push, and
@@ -74,6 +79,27 @@ For implementation, the minimum start request is:
 For review or investigation, use `explorer`, `reviewer`, or the more specialized
 read-only roles instead. The role boundary is supplied by the plugin; the
 calling agent does not need to recreate it in every prompt.
+
+## Calling it from Codex
+
+Ask Codex, for example, "Have Claude review this with Opus and high effort" or
+"Have Claude implement this using Fable and xhigh effort; allow its subagents."
+Codex maps these instructions to `role`, `model`, `effort`, and
+`subagent_mode` in the start tool. The plugin itself does not parse natural language.
+Selecting a plugin or skill explicitly also makes the intended route clear.
+
+The MCP server connecting and Codex choosing a tool are separate steps.
+An ordinary review request does not automatically delegate to Claude. The
+calling skill discovers deferred tools, checks `codex_claude_subagent_info`,
+then starts a session when Claude involvement is requested.
+
+`role` defaults to `reviewer`; `subagent_mode` defaults to `disabled` for every
+role. Use `subagent_mode: "auto"` explicitly with `implementer` to expose the
+native Agent tool. Claude Code decides whether and how to delegate; the adapter
+does not add a planner. Explicit `tools` lists are never expanded silently.
+Read-only roles currently reject `auto`, because custom-agent tool inheritance
+has not been proven to preserve their tool boundary. Project MCP can expose
+other delegation tools; this is a built-in-tool contract, not an OS sandbox.
 
 ## Model and effort selection
 
@@ -97,6 +123,15 @@ Claude Code uses its own default. The default therefore comes from the installed
 Claude Code, the user's account, and its normal settings sources. There is no
 automatic model fallback injected by the plugin.
 
+The response's `requested_model` and `requested_effort` are requested values,
+not proof of effective selection. `observed` records what the observer saw;
+`last_api_model` means the final API response's model, not every step's model.
+An inherited `CLAUDE_CODE_EFFORT_LEVEL` outranks `--effort`; a conflicting
+explicit request is rejected before launch instead of silently using another
+level. Omitted values preserve normal Claude Code settings and environment.
+Recent models use per-model effort settings; an older user-level
+`effortLevel: "high"` does not necessarily apply to a newer model.
+
 The model and effort are fixed for a live session. To change them while
 preserving the Claude conversation, stop the session and resume the exact
 `claude_session_id` with the same `cwd` and `role`, supplying the new values.
@@ -117,8 +152,50 @@ The plugin is packaged for the Codex plugin system and is intended to work in:
 - Codex desktop app (the primary local-app workflow).
 - Codex CLI, which supports installing and running Codex plugins.
 
-In both hosts, Codex is the calling agent and Claude Code is the leaf
-subagent; the plugin does not create nested Claude agents or teams.
+In both hosts, Codex is the calling agent. Claude runs alone by default;
+explicitly enabled native delegation is decided by Claude Code.
+
+## Completion and startup
+
+A bundled passive Claude Code Mod observes `turn.start` and `turn.complete`
+for this session. It does not change prompts, model requests, permissions, or
+user Stop hooks. Completion is correlated by session generation, Claude UUID,
+request token, and main turn ID. Child-agent completion cannot finish the
+parent request. Normal completion does not wait for the roughly 60-second
+`idle_prompt` notification. Stop and printed markers alone never establish
+success, including when hooks or Mods cannot load.
+
+Startup checks the observer handshake before sending any request. If workspace
+trust or the bypass warning needs attention, no request is sent; review the
+prompt in your own Claude Code terminal, then start a new plugin session.
+An already recorded user-level bypass acceptance is carried into private
+session settings, including with `mcp_preset: "none"`; no new acceptance is
+created and user/project settings are not edited.
+
+`done: true` means the correlated **main turn** ended, not that all project
+work has been accepted. `completion_scope` is `main_turn`.
+`work_pending` reports observed background tasks; `count_unknown` means that
+their count was unavailable. Interpret these flags with the completed turn's
+result, not as acceptance of the whole task. Future cron schedules are reported separately
+and do not block completion. Codex must check the expected jobs, results and
+artifacts before declaring the user's task complete. For example:
+
+```json
+{ "done": true, "completion_scope": "main_turn", "work_pending": true,
+  "background_tasks_pending": 1, "count_unknown": false }
+```
+
+Tokenless main turns update `latest_native_outcome` on the session, never
+another request. Sending is rejected while an observed native main turn is
+active or a record is incomplete; use read/wait or stop. This check is
+best-effort: a turn can start between checking and writing input, which Claude
+Code can queue. Without a correlated native completion, the adapter never
+claims that request completed. Timeout keeps the request ID and input lock;
+continue with `claude_interactive_wait_request` rather than resending text.
+If a Mod is blocked or its records are unavailable, report the startup or
+observation failure; do not promote Stop, a marker, or silence to success.
+If a record remains incomplete (for example after a disk write failure), stop
+the session and resume its exact Claude UUID after resolving the cause.
 
 ## Requirements
 
@@ -126,7 +203,7 @@ subagent; the plugin does not create nested Claude agents or teams.
 - Codex desktop app or Codex CLI with plugin support
 - Node.js 20 or newer
 - Python 3
-- Claude Code with the interactive and session options required by the selected role
+- Claude Code 2.1.322 or newer, with local observer Mods permitted
 - An active `claude.ai` subscription login in Claude Code
 
 Linux and Windows are not currently supported because the local PTY bridge is

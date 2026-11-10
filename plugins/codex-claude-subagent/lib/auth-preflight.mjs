@@ -110,6 +110,7 @@ export function createClaudeAuthPreflight({
               mcp_config: helpText.includes("--mcp-config"),
               strict_mcp_config: helpText.includes("--strict-mcp-config"),
               settings: helpText.includes("--settings"),
+              plugin_dir: helpText.includes("--plugin-dir"),
               setting_sources: helpText.includes("--setting-sources"),
               append_system_prompt_file:
                 helpText.includes("--append-system-prompt-file") || helpText.includes("--append-system-prompt[-file]"),
@@ -217,15 +218,18 @@ export function createClaudeAuthPreflight({
     };
   }
 
-  async function detectClaudeAuth(cwd = process.cwd()) {
+  async function detectClaudeAuth(cwd = process.cwd(), { settingSources = ["user", "project", "local"] } = {}) {
     const env = { ...buildEnvironment(), FORCE_COLOR: "0", NO_COLOR: "1" };
-    const status = await runClaudeCommand(["--setting-sources", "", "auth", "status", "--json"], {
+    const status = await runClaudeCommand(["--setting-sources", settingSources.join(","), "auth", "status", "--json"], {
       cwd,
       env,
       timeoutMs: statusTimeoutMs,
     });
     const parsed = parseJsonObject(status.stdout);
-    const statusFailure = classifyCommandFailure(status, parsed);
+    // `auth status` uses exit 1 for a valid logged-out status. Do not discard
+    // that JSON, or mistake a nonzero *logged-in* result for a usable login.
+    const loggedOut = status.status === 1 && parsed?.loggedIn === false && !status.timed_out && !status.spawn_error;
+    const statusFailure = loggedOut ? null : classifyCommandFailure(status, parsed);
     const usableStatus = statusFailure === null ? parsed : null;
     const loggedIn = usableStatus?.loggedIn === true;
     const authMethod = normalizeMetadata(usableStatus?.authMethod);

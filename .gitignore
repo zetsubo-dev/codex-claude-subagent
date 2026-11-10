@@ -16,6 +16,10 @@ coverage/
 dist/
 *.tsbuildinfo
 
+# Claude Code generates local Mod editor support on first load.
+plugins/codex-claude-subagent/observer/.claude-plugin/types/
+plugins/codex-claude-subagent/observer/tsconfig.json
+
 # Local environment files
 .env
 .env.*

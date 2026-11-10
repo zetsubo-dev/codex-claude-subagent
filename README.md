@@ -5,14 +5,15 @@ Claude Code sessions as role-controlled subagents for exploration, code review,
 and implementation.
 
 Sessions remain observable and resumable from Codex. The plugin does not use
-the Claude API, `claude -p`, API-key billing, or nested agents.
+the Claude API, `claude -p`, or API-key billing. Claude runs alone by default;
+its native subagents are available for implementation only when explicitly requested.
 It uses the Claude Code installation already available on your Mac and does not
 install Claude Code for you.
 
 ## Install
 
 You need macOS, Node.js 20 or newer, Python 3, a plugin-enabled Codex desktop
-app or Codex CLI, and Claude Code already signed in with an active `claude.ai`
+app or Codex CLI, and Claude Code 2.1.322 or newer already signed in with an active `claude.ai`
 subscription.
 
 ### Codex desktop app from a ZIP

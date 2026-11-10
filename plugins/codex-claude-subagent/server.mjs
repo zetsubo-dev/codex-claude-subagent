@@ -12,6 +12,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import * as z from "zod/v4";
 import { createClaudeAuthPreflight } from "./lib/auth-preflight.mjs";
 import { createSessionRegistrySupport } from "./lib/session-registry.mjs";
+import { readObserverRecords } from "./lib/observer.mjs";
 
 const PLUGIN_DIR = path.dirname(fileURLToPath(import.meta.url));
 const BASE_VERSION = "0.2.0";
@@ -25,6 +26,8 @@ const MCP_CONFIG_DIR = path.join(STATE_DIR, "mcp-configs");
 const HOOK_EVENT_DIR = path.join(STATE_DIR, "hook-events");
 const HOOK_SETTINGS_DIR = path.join(STATE_DIR, "hook-settings");
 const INSTRUCTION_CONTEXT_DIR = path.join(STATE_DIR, "instruction-contexts");
+const OBSERVER_EVENT_DIR = path.join(STATE_DIR, "observer-events");
+const OBSERVER_PLUGIN_DIR = path.join(PLUGIN_DIR, "observer");
 const SESSION_REGISTRY_PATH = path.join(STATE_DIR, "interactive-sessions.json");
 const SESSION_REGISTRY_LOCK_DIR = path.join(STATE_DIR, "interactive-sessions.lock");
 const INSTANCE_ID = crypto.randomUUID();
@@ -174,7 +177,7 @@ const ROLE_PROFILES = {
     tools: READ_ONLY_BUILTIN_TOOLS,
     allowedTools: READ_ONLY_ALLOWED_TOOLS,
     disallowedTools: [],
-    permissionMode: "plan",
+    permissionMode: "bypassPermissions",
   },
   reviewer: {
     mode: "read_only",
@@ -185,7 +188,7 @@ const ROLE_PROFILES = {
     tools: READ_ONLY_BUILTIN_TOOLS,
     allowedTools: READ_ONLY_ALLOWED_TOOLS,
     disallowedTools: [],
-    permissionMode: "plan",
+    permissionMode: "bypassPermissions",
   },
   security_reviewer: {
     mode: "read_only",
@@ -196,7 +199,7 @@ const ROLE_PROFILES = {
     tools: READ_ONLY_BUILTIN_TOOLS,
     allowedTools: READ_ONLY_ALLOWED_TOOLS,
     disallowedTools: [],
-    permissionMode: "plan",
+    permissionMode: "bypassPermissions",
   },
   critic: {
     mode: "read_only",
@@ -207,7 +210,7 @@ const ROLE_PROFILES = {
     tools: READ_ONLY_BUILTIN_TOOLS,
     allowedTools: READ_ONLY_ALLOWED_TOOLS,
     disallowedTools: [],
-    permissionMode: "plan",
+    permissionMode: "bypassPermissions",
   },
   architect: {
     mode: "read_only",
@@ -218,7 +221,7 @@ const ROLE_PROFILES = {
     tools: READ_ONLY_BUILTIN_TOOLS,
     allowedTools: READ_ONLY_ALLOWED_TOOLS,
     disallowedTools: [],
-    permissionMode: "plan",
+    permissionMode: "bypassPermissions",
   },
   implementer: {
     mode: "implementation",
@@ -229,7 +232,7 @@ const ROLE_PROFILES = {
     tools: IMPLEMENTER_BUILTIN_TOOLS,
     allowedTools: IMPLEMENTER_ALLOWED_TOOLS,
     disallowedTools: [],
-    permissionMode: "dontAsk",
+    permissionMode: "bypassPermissions",
   },
 };
 
@@ -317,6 +320,9 @@ function ensureState() {
   fs.mkdirSync(INSTRUCTION_CONTEXT_DIR, { recursive: true, mode: PRIVATE_DIR_MODE });
   chmodBestEffort(INSTRUCTION_CONTEXT_DIR, PRIVATE_DIR_MODE);
 
+  ensureNotSymlink(OBSERVER_EVENT_DIR);
+  fs.mkdirSync(OBSERVER_EVENT_DIR, { recursive: true, mode: PRIVATE_DIR_MODE });
+
   ensureNotSymlink(SESSION_REGISTRY_PATH);
   ensureNotSymlink(SESSION_REGISTRY_LOCK_DIR);
 }
@@ -379,6 +385,14 @@ function cleanupSessionArtifacts(record) {
   removeOwnedArtifact(record.hook_event_path, HOOK_EVENT_DIR);
   removeOwnedArtifact(record.hook_settings_path, HOOK_SETTINGS_DIR);
   removeOwnedArtifact(record.instruction_context_path, INSTRUCTION_CONTEXT_DIR);
+  if (
+    record.observer_event_dir &&
+    path.dirname(record.observer_event_dir) === OBSERVER_EVENT_DIR &&
+    /^clint_[a-z0-9_]+$/.test(path.basename(record.observer_event_dir))
+  ) {
+    const stat = fs.lstatSync(record.observer_event_dir, { throwIfNoEntry: false });
+    if (stat?.isDirectory() && !stat.isSymbolicLink()) fs.rmSync(record.observer_event_dir, { recursive: true });
+  }
 }
 
 function sessionArtifactSizeBytes(record) {
@@ -529,6 +543,10 @@ function persistInteractiveSession(session) {
     hook_file_generation: session.hook_file_generation,
     hook_settings_path: session.hook_settings_path,
     instruction_context_path: session.instruction_context_path,
+    observer_event_dir: session.observer_event_dir,
+    native_active_turn_id: session.native_active_turn_id || null,
+    native_active_since: session.native_active_since || null,
+    latest_native_outcome: session.latest_native_outcome || null,
     hooks_active: session.hooks_active,
     last_hook_event: session.last_hook_event,
     active_request: compactRequest(session.active_request),
@@ -687,6 +705,10 @@ function defaultMcpPresetForRole() {
   return DEFAULT_READ_ONLY_MCP_PRESET;
 }
 
+function settingSourcesFor(input = {}) {
+  return input.mcp_preset === "none" ? [] : ["user", "project", "local"];
+}
+
 function writePrivateMcpConfig(config, digestInput) {
   ensureState();
   const digest = crypto
@@ -742,6 +764,18 @@ function writeInstructionContext(interactiveId, role) {
 
 function createHookRuntime(interactiveId, role) {
   ensureState();
+  const observerEventDir = path.join(OBSERVER_EVENT_DIR, interactiveId);
+  fs.mkdirSync(observerEventDir, { mode: PRIVATE_DIR_MODE });
+  // Freeze the Mod for this session. Editing the source plugin must not hot
+  // reload a live observer and reset its sequence/correlation state.
+  const observerPluginDir = path.join(observerEventDir, "plugin");
+  for (const relative of [".claude-plugin/plugin.json", "hooks/hooks.json", "hooks/register.mjs"]) {
+    const target = path.join(observerPluginDir, relative);
+    fs.mkdirSync(path.dirname(target), { recursive: true, mode: PRIVATE_DIR_MODE });
+    fs.copyFileSync(path.join(OBSERVER_PLUGIN_DIR, relative), target, fs.constants.COPYFILE_EXCL);
+    chmodBestEffort(target, PRIVATE_FILE_MODE);
+  }
+  const observerGeneration = crypto.randomUUID();
   const eventPath = path.join(HOOK_EVENT_DIR, `${interactiveId}.jsonl`);
   const settingsPath = path.join(HOOK_SETTINGS_DIR, `${interactiveId}.json`);
   const instructionContextPath = writeInstructionContext(interactiveId, role);
@@ -770,6 +804,17 @@ function createHookRuntime(interactiveId, role) {
     ];
   }
   const settings = { hooks };
+  // Preserve an acceptance the user already recorded, even for the MCP-free
+  // preset, whose setting sources are empty. Never accept on their behalf.
+  try {
+    const configDir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
+    const userSettings = JSON.parse(fs.readFileSync(path.join(configDir, "settings.json"), "utf8"));
+    if (userSettings.skipDangerousModePermissionPrompt === true) {
+      settings.skipDangerousModePermissionPrompt = true;
+    }
+  } catch {
+    // Missing or invalid settings leave Claude Code's warning enabled.
+  }
   fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), {
     mode: PRIVATE_FILE_MODE,
     flag: "wx",
@@ -777,6 +822,9 @@ function createHookRuntime(interactiveId, role) {
   chmodBestEffort(eventPath, PRIVATE_FILE_MODE);
   chmodBestEffort(settingsPath, PRIVATE_FILE_MODE);
   return {
+    observerEventDir,
+    observerPluginDir,
+    observerGeneration,
     eventPath,
     settingsPath,
     hookFileGeneration,
@@ -815,15 +863,31 @@ function resolveMcpSettings({ mcp_preset }) {
   };
 }
 
-function startupMcpSelectorVisible(session) {
-  const recentOutput = stripAnsi(session.output_tail || "").slice(-12000);
+function startupMcpSelectorVisible(session, sinceSeq = 0) {
+  const recentOutput = interactiveTextSince(session, sinceSeq, { strip: true }).slice(-12000);
   return STARTUP_MCP_SELECTOR_RE.test(recentOutput);
+}
+
+function assertNoStartupDialog(session, sinceSeq) {
+  const text = interactiveTextSince(session, sinceSeq, { strip: true }).replace(/\s+/g, "").toLowerCase();
+  if (text.includes("yes,itrustthisfolder") && (text.includes("no,exit") || text.includes("quicksafetycheck"))) {
+    throw new Error(
+      "Claude Code is waiting for workspace trust. No request was sent. " +
+        `Open Claude Code in ${session.cwd}, review the folder trust prompt, then retry in a new session.`,
+    );
+  }
+  if (text.includes("yes,iaccept") && (text.includes("no,exit") || text.includes("bypasspermissionsmode"))) {
+    throw new Error(
+      "Claude Code is waiting for the bypass-permissions warning. No request was sent. " +
+        "Run claude --permission-mode bypassPermissions in your terminal and review the warning, then retry in a new session.",
+    );
+  }
 }
 
 function resolveToolPermissions({ profile, allowed_tools, disallowed_tools }) {
   const baseAllowedTools = allowed_tools === null ? [] : allowed_tools || profile.allowedTools || profile.tools || [];
   const baseDisallowedTools = disallowed_tools === null ? [] : disallowed_tools || profile.disallowedTools || [];
-  return { resolvedAllowedTools: baseAllowedTools, resolvedDisallowedTools: baseDisallowedTools };
+  return { resolvedAllowedTools: [...baseAllowedTools], resolvedDisallowedTools: [...baseDisallowedTools] };
 }
 
 function flagName(argument) {
@@ -870,13 +934,35 @@ function assertForwardedClaudeArgs(claudeArgs) {
 function assertSafeOverrides(input) {
   const role = input.role || "reviewer";
   const profile = profileFor(role);
+  const subagentMode = input.subagent_mode || "disabled";
+  if (subagentMode === "auto" && READ_ONLY_ROLES.has(role)) {
+    throw new Error(
+      "subagent_mode=auto is currently supported only for implementer; custom-agent read-only tool inheritance is not verified.",
+    );
+  }
+  if (
+    subagentMode === "auto" &&
+    input.tools &&
+    !input.tools.some((tool) => ["Agent", "Task", "default"].includes(tool))
+  ) {
+    throw new Error("subagent_mode=auto conflicts with the explicit tools list: include Agent or choose disabled.");
+  }
+  if (subagentMode === "auto" && input.disallowed_tools?.some((tool) => /^(?:Agent|Task)(?:$|[(:])/.test(tool))) {
+    throw new Error("subagent_mode=auto conflicts with the explicit delegation deny list.");
+  }
+  if (input.effort && process.env.CLAUDE_CODE_EFFORT_LEVEL && input.effort !== process.env.CLAUDE_CODE_EFFORT_LEVEL) {
+    throw new Error(
+      "Explicit effort conflicts with inherited CLAUDE_CODE_EFFORT_LEVEL, which Claude Code prioritizes over --effort. Resolve that environment setting before starting; no session was created.",
+    );
+  }
   assertForwardedClaudeArgs(input.claude_args);
-  const nestedAgentOverride = [...(input.tools || []), ...(input.allowed_tools || [])].find((tool) =>
-    NESTED_AGENT_TOOL_PATTERN.test(String(tool)),
+  const nestedAgentOverride = [...(input.tools || []), ...(input.allowed_tools || [])].find(
+    (tool) =>
+      NESTED_AGENT_TOOL_PATTERN.test(String(tool)) && (subagentMode !== "auto" || /^(?:Team|SendMessage)/.test(tool)),
   );
   if (nestedAgentOverride) {
     throw new Error(
-      `Nested agent tool '${nestedAgentOverride}' is not allowed; Codex–Claude Subagent is a leaf subagent.`,
+      `Nested agent tool '${nestedAgentOverride}' is not allowed in this mode; the default is a leaf subagent.`,
     );
   }
 
@@ -963,14 +1049,17 @@ function buildInteractiveArgs(input, hookRuntime) {
   const resolvedModel = input.model || null;
   const resolvedEffort = input.effort || null;
   const resolvedFallback = null;
-  const resolvedTools = input.tools === null ? [] : input.tools || profile.tools;
+  const subagentMode = input.subagent_mode || "disabled";
+  const defaultTools = subagentMode === "auto" ? [...profile.tools, "Agent"] : profile.tools;
+  const resolvedTools = input.tools === null ? [] : input.tools || defaultTools;
   const mcpSettings = resolveMcpSettings({ mcp_preset: input.mcp_preset });
-  const settingSources = mcpSettings.preset === "none" ? [] : ["user", "project", "local"];
+  const settingSources = settingSourcesFor(input);
   const { resolvedAllowedTools, resolvedDisallowedTools } = resolveToolPermissions({
     profile,
     allowed_tools: input.allowed_tools,
     disallowed_tools: input.disallowed_tools,
   });
+  if (subagentMode === "disabled") resolvedDisallowedTools.push("Agent", "Task");
   const resolvedPermissionMode = input.permission_mode || profile.permissionMode;
 
   if (input.name) args.push("--name", input.name);
@@ -985,6 +1074,7 @@ function buildInteractiveArgs(input, hookRuntime) {
   args.push("--setting-sources", settingSources.join(","));
   if (hookRuntime?.useSettings) args.push("--settings", hookRuntime.settingsPath);
   args.push("--append-system-prompt-file", hookRuntime.instructionContextPath);
+  args.push("--plugin-dir", hookRuntime.observerPluginDir);
   pushCsvArg(args, "--tools", resolvedTools, { allowEmpty: true });
   pushCsvArg(args, "--allowedTools", resolvedAllowedTools);
   pushCsvArg(args, "--disallowedTools", resolvedDisallowedTools);
@@ -1009,13 +1099,17 @@ function buildInteractiveArgs(input, hookRuntime) {
       mcp_config: mcpSettings.config,
       permission_mode: resolvedPermissionMode,
       role: input.role || "reviewer",
+      subagent_mode: subagentMode,
+      requested_model: resolvedModel,
+      requested_effort: resolvedEffort,
+      observed: null,
       mode: profile.mode,
       purpose: profile.purpose,
       mutates_files: profile.mutatesFiles,
       requires_worktree: profile.requiresWorktree,
       filesystem_isolation: profile.filesystemIsolation,
       claude_args: input.claude_args || [],
-      completion_transport: hookRuntime ? "claude_code_hooks_with_marker_fallback" : "completion_marker",
+      completion_transport: "claude_code_mod",
     },
   };
 }
@@ -1189,13 +1283,22 @@ function compactRequest(request, { includePermissionAttention = false } = {}) {
   if (!request) return null;
   const pending = requestIsPending(request);
   const waitPolicy = pending ? requestWaitPolicy(request) : null;
-  const waitRequired = pending && !waitPolicy.long_running;
+  const waitRequired = pending && !waitPolicy.long_running && !request.attention_required;
   const compacted = {
     request_id: request.request_id,
     status: request.status,
     done: request.done,
     terminal_state: request.terminal_state,
     completion_transport: request.completion_transport,
+    completion_confirmation: request.completion_confirmation || null,
+    completion_scope: "main_turn",
+    work_pending: request.background_tasks_pending > 0,
+    count_unknown: request.background_tasks_pending == null,
+    stop_block_overridden: request.stop_block_overridden ?? null,
+    observed: request.observed || null,
+    background_tasks_pending: request.background_tasks_pending ?? null,
+    session_crons_pending: request.session_crons_pending ?? null,
+    provisional_result_text: request.provisional_result_text || null,
     completion_marker: request.completion_marker,
     marker_seen: request.marker_seen,
     start_seq: request.start_seq,
@@ -1243,7 +1346,7 @@ function compactRequest(request, { includePermissionAttention = false } = {}) {
             instruction:
               "The request is still active after the 90-minute schedule. Ask the user whether to continue waiting or stop; do not resend the request text.",
           }
-        : null,
+        : request.attention_required || null,
   };
   if (includePermissionAttention) compacted.permission_attention = request.permission_attention || null;
   return compacted;
@@ -1275,19 +1378,21 @@ function finalizeRequest(
   { status, terminalState, markerSeen = request.marker_seen || false, event = null },
 ) {
   const now = new Date().toISOString();
+  markerSeen ||= interactiveTextSince(session, request.start_seq).includes(request.completion_marker);
   request.status = status;
   request.done = status === "completed";
   request.terminal_state = terminalState;
   request.marker_seen = markerSeen;
   request.completion_event = event;
+  request.attention_required = null;
   clearPermissionAttention(request);
   request.completion_transport =
-    event?.hook_event_name === "Stop"
-      ? "claude_code_stop_hook"
-      : event?.hook_event_name === "StopFailure"
-        ? "claude_code_stop_failure_hook"
-        : markerSeen
-          ? "completion_marker"
+    event?.hook_event_name === "turn.complete"
+      ? "claude_code_mod"
+      : event?.hook_event_name === "Stop"
+        ? "claude_code_stop_hook"
+        : event?.hook_event_name === "StopFailure"
+          ? "claude_code_stop_failure_hook"
           : request.completion_transport;
   request.completed_at = now;
   request.end_log_offset = fileSizeBytes(session.log_path);
@@ -1295,6 +1400,125 @@ function finalizeRequest(
   if (session.active_request?.request_id === request.request_id) session.active_request = null;
   session.updated_at = now;
   persistInteractiveSession(session);
+}
+
+function refreshObserverEvents(session) {
+  if (!session.observer_event_dir) return;
+  const records = readObserverRecords(
+    session.observer_event_dir,
+    session.observer_generation,
+    session.observer_seq || 0,
+  );
+  session.observer_record_pending = records.pending;
+  if (records.skipped_sequences.length) {
+    session.observer_skipped_sequences = [
+      ...(session.observer_skipped_sequences || []),
+      ...records.skipped_sequences,
+    ].slice(-64);
+    session.observer_uncertain = true;
+  }
+  for (const { event, file } of records) {
+    if (event.kind === "ready") {
+      session.observer_ready = true;
+      session.observer_version = event.version;
+      session.claude_session_id = event.session_id;
+      session.resolved.claude_session_id = event.session_id;
+    } else if (session.observer_ready && event.session_id === session.claude_session_id && !event.agent_id) {
+      if (event.kind === "turn.start" && typeof event.turn_id === "string") {
+        session.native_active_turn_id = event.turn_id;
+        session.native_active_since = event.at;
+        session.observer_uncertain = false;
+      } else if (event.kind === "turn.complete" && typeof event.turn_id === "string") {
+        if (session.native_active_turn_id === event.turn_id) {
+          session.native_active_turn_id = null;
+          session.native_active_since = null;
+        }
+        session.latest_native_outcome = {
+          turn_id: event.turn_id,
+          at: event.at,
+          reason: event.reason,
+          answer: typeof event.answer === "string" ? event.answer.slice(0, 64000) : null,
+          background_tasks_pending: event.stop?.background_tasks_pending ?? null,
+          session_crons_pending: event.stop?.session_crons_pending ?? null,
+        };
+        if (!session.native_active_turn_id) session.observer_uncertain = false;
+      }
+      const request = session.active_request;
+      if (request && event.request_token === request.hook_correlation_token && !event.agent_id) {
+        if (event.kind === "turn.start") {
+          request.native_turn_id = event.turn_id;
+          request.submitted_at ||= event.at;
+          request.status = "working";
+        } else if (
+          event.kind === "turn.complete" &&
+          typeof event.turn_id === "string" &&
+          (!request.native_turn_id || request.native_turn_id === event.turn_id)
+        ) {
+          request.native_turn_id = event.turn_id;
+          request.marker_seen ||= interactiveTextSince(session, request.start_seq).includes(request.completion_marker);
+          if (typeof event.answer !== "string" || typeof event.is_aborted !== "boolean") {
+            session.observer_seq = event.seq;
+            fs.rmSync(file, { force: true });
+            continue;
+          }
+          const stop = event.stop || request.stop_candidate;
+          request.background_tasks_pending =
+            event.stop?.background_tasks_pending ?? request.stop_candidate?.background_tasks_pending ?? null;
+          request.session_crons_pending =
+            event.stop?.session_crons_pending ?? request.stop_candidate?.session_crons_pending ?? null;
+          request.stop_block_overridden = typeof event.stop?.blocked === "boolean" ? event.stop.blocked : null;
+          request.observed = {
+            model: typeof event.observed?.model === "string" ? event.observed.model : null,
+            effort: typeof event.observed?.effort === "string" ? event.observed.effort : null,
+            last_api_model: event.last_api_model || null,
+            source: "claude_code_mod",
+            note: "turn.step observation; downstream mods or model limits may change effort",
+            effort_matches_request:
+              session.resolved.requested_effort && event.observed?.effort != null
+                ? session.resolved.requested_effort === event.observed.effort
+                : null,
+          };
+          session.resolved.observed = request.observed;
+          const completion = {
+            ...event,
+            hook_event_name: "turn.complete",
+            last_assistant_message: event.answer || null,
+            last_assistant_message_truncated: Boolean(event.answer_truncated),
+          };
+          request.completion_confirmation = "native_turn_complete";
+          if (event.is_aborted || event.reason === "aborted" || stop?.prevent_continuation) {
+            finalizeRequest(session, request, {
+              status: "interrupted",
+              terminalState: "native_turn_aborted",
+              event: completion,
+            });
+          } else if (["error", "refusal"].includes(event.reason)) {
+            finalizeRequest(session, request, {
+              status: "failed",
+              terminalState: `native_turn_${event.reason}`,
+              event: completion,
+            });
+          } else if (event.reason === "answer") {
+            finalizeRequest(session, request, {
+              status: "completed",
+              terminalState: "completed_with_native_event",
+              event: completion,
+            });
+          } else {
+            request.provisional_result_text = event.answer || null;
+            request.attention_required = {
+              reason: "completion_unconfirmed",
+              instruction:
+                "An unknown native completion reason was observed. Read the session or stop it; do not resend the request.",
+            };
+          }
+        }
+      }
+    }
+    session.observer_seq = event.seq;
+    fs.rmSync(file, { force: true });
+    persistInteractiveSession(session);
+  }
 }
 
 function refreshHookEvents(session) {
@@ -1373,7 +1597,7 @@ function refreshHookEvents(session) {
         request.prompt_event_offset = event.event_offset_end;
       } else if (event.hook_event_name === "Notification" && eventAfterPrompt) {
         request.last_notification = event;
-        if (event.notification_type === "permission_prompt") {
+        if (["permission_prompt", "elicitation_dialog", "elicitation_url_dialog"].includes(event.notification_type)) {
           const attentionKey = permissionAttentionKey(event);
           const duplicateAttention =
             request.permission_attention && permissionAttentionKey(request.permission_attention) === attentionKey;
@@ -1383,12 +1607,15 @@ function refreshHookEvents(session) {
           }
         }
       } else if (eventAfterPrompt && event.hook_event_name === "Stop") {
-        finalizeRequest(session, request, {
-          status: "completed",
-          terminalState: "completed_with_stop_hook",
-          event,
-        });
+        // Other Stop hooks run concurrently and may block stopping.
+        // Native turn.complete, not this parallel settings hook, confirms
+        // that this candidate really is the final response.
+        request.stop_candidate = event;
+        request.terminal_state = "awaiting_native_completion";
+        persistInteractiveSession(session);
       } else if (eventAfterPrompt && event.hook_event_name === "StopFailure") {
+        session.native_active_turn_id = null;
+        session.native_active_since = null;
         finalizeRequest(session, request, {
           status: "failed",
           terminalState: `stop_failure:${event.error || "unknown"}`,
@@ -1407,6 +1634,7 @@ function refreshHookEventsFromMonitor(session) {
   if (!session?.hook_event_path || !LIVE_SESSION_STATUSES.has(session.status)) return [];
   try {
     const events = refreshHookEvents(session);
+    refreshObserverEvents(session);
     if (session.hook_monitor_error) {
       session.hook_monitor_error = null;
       persistInteractiveSession(session);
@@ -1563,6 +1791,11 @@ function compactInteractiveSession(
     exit_code: session.exit_code,
     signal: session.signal,
     error: session.error,
+    native_active_turn_id: session.native_active_turn_id || null,
+    native_active_since: session.native_active_since || null,
+    latest_native_outcome: session.latest_native_outcome || null,
+    observer_record_pending: Boolean(session.observer_record_pending),
+    observer_skipped_sequences: session.observer_skipped_sequences || [],
     ready_at: session.ready_at,
     ready_wait: session.ready_wait,
     hooks_active: session.hooks_active,
@@ -1634,6 +1867,15 @@ function persistedSessionView(record, { includeOutput = false, maxChars = MAX_TA
   return view;
 }
 
+function assertNativeInputAvailable(session) {
+  refreshObserverEvents(session);
+  if (session.native_active_turn_id || session.observer_record_pending || session.observer_uncertain) {
+    throw new Error(
+      "Claude's native main turn is active or its observer state is incomplete. Use claude_interactive_read / claude_interactive_wait, or claude_interactive_stop; do not resend input while it is active.",
+    );
+  }
+}
+
 function assertInteractiveInputAvailable(session) {
   if (requestIsPending(session.active_request)) {
     throw new Error(
@@ -1644,6 +1886,7 @@ function assertInteractiveInputAvailable(session) {
         ". Use claude_interactive_wait_request before sending another input.",
     );
   }
+  assertNativeInputAvailable(session);
 }
 
 function acquireInteractiveInputLease(session, operation) {
@@ -1666,6 +1909,7 @@ async function writeInteractiveInput(session, text, { submit = true, paste = tru
     throw new Error(`Interactive Claude session ${session.interactive_id} is not running.`);
   }
   const body = String(text || "");
+  assertNativeInputAvailable(session);
   if (paste) {
     await writeProcessStdin(session, `\x1b[200~${body}\x1b[201~`);
     if (submit) await delay(submitDelayForPaste(body));
@@ -1675,7 +1919,11 @@ async function writeInteractiveInput(session, text, { submit = true, paste = tru
   if (submit) {
     const enterCount = paste ? SUBMIT_ENTER_COUNT : 1;
     for (let index = 0; index < enterCount; index += 1) {
-      if (index > 0) await delay(SUBMIT_ENTER_GAP_MS);
+      if (index > 0) {
+        await delay(SUBMIT_ENTER_GAP_MS);
+        refreshObserverEvents(session);
+        if (session.native_active_turn_id || session.observer_record_pending || session.observer_uncertain) break;
+      }
       await writeProcessStdin(session, "\r");
     }
   }
@@ -1725,6 +1973,17 @@ async function confirmInteractiveSubmit(
     if (!/Pasted text|Past ext|paste again/i.test(text)) {
       return { reason: wait.reason, attempts };
     }
+    refreshObserverEvents(session);
+    if (
+      hookCorrelationToken &&
+      session.active_request?.hook_correlation_token === hookCorrelationToken &&
+      session.active_request.submitted_at
+    ) {
+      return { reason: "submitted", transport: "native_turn_start", attempts };
+    }
+    if (session.native_active_turn_id || session.observer_record_pending || session.observer_uncertain) {
+      return { reason: "native_state_unavailable", attempts };
+    }
     await writeProcessStdin(session, "\r");
   }
   return { reason: "unconfirmed", attempts };
@@ -1734,9 +1993,10 @@ async function ensureInteractiveReady(session) {
   if (session.ready_at) {
     return { reason: "already_ready", waited_ms: 0 };
   }
+  let sinceSeq = 0;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const wait = await waitForInteractive(session, {
-      sinceSeq: 0,
+      sinceSeq,
       idleMs: STARTUP_READY_IDLE_MS,
       timeoutMs: STARTUP_READY_TIMEOUT_MS,
       strip: true,
@@ -1749,7 +2009,19 @@ async function ensureInteractiveReady(session) {
         `Interactive Claude session ${session.interactive_id} did not become ready before first input: ${wait.reason}`,
       );
     }
-    if (!startupMcpSelectorVisible(session)) {
+    assertNoStartupDialog(session, sinceSeq);
+    if (!startupMcpSelectorVisible(session, sinceSeq)) {
+      const deadline = Date.now() + STARTUP_READY_TIMEOUT_MS;
+      while (!session.observer_ready && Date.now() < deadline && session.status === "running") {
+        refreshObserverEvents(session);
+        assertNoStartupDialog(session, sinceSeq);
+        if (!session.observer_ready) await delay(50);
+      }
+      if (!session.observer_ready) {
+        throw new Error(
+          `Claude Code's lifecycle observer did not load. No request was sent. Call claude_interactive_stop for ${session.interactive_id}, then check CLI version, Mod policy and startup output; Claude Code 2.1.322 or newer is required.`,
+        );
+      }
       session.ready_at = new Date().toISOString();
       return wait;
     }
@@ -1763,6 +2035,7 @@ async function ensureInteractiveReady(session) {
 
     // Claude Code shows this selector on first project startup. Confirm the
     // project's checked MCP servers without sending the review request text.
+    sinceSeq = session.next_seq - 1;
     await writeProcessStdin(session, session.resolved.mcp_preset === "none" ? "\u001b" : "\r");
     await delay(150);
   }
@@ -1817,6 +2090,17 @@ async function waitForInteractive(
       const text = waiter.buffer;
       if (untilHookEvents?.length) {
         refreshHookEvents(session);
+        refreshObserverEvents(session);
+        if (hookCorrelationToken) {
+          const acknowledged = session.active_request || session.last_request;
+          if (acknowledged?.hook_correlation_token === hookCorrelationToken && acknowledged.submitted_at) {
+            return {
+              reason: "hook",
+              matched_hook: { hook_event_name: "UserPromptSubmit", source: "native_turn_start" },
+              waited_ms: Date.now() - started,
+            };
+          }
+        }
         if (
           hookRequestId &&
           session.last_request?.request_id === hookRequestId &&
@@ -1835,11 +2119,11 @@ async function waitForInteractive(
           wakeOnPermissionAttention &&
           hookRequestId &&
           session.active_request?.request_id === hookRequestId &&
-          session.active_request.permission_attention
+          (session.active_request.permission_attention || session.active_request.attention_required)
         ) {
           return {
             reason: "hook",
-            matched_hook: session.active_request.permission_attention,
+            matched_hook: session.active_request.permission_attention || session.active_request.attention_required,
             waited_ms: Date.now() - started,
           };
         }
@@ -1940,7 +2224,7 @@ function beginInteractiveRequest(session, completionMarker) {
     status: "submitting",
     done: false,
     terminal_state: "submitting",
-    completion_transport: session.hooks_active ? "claude_code_hooks_with_marker_fallback" : "completion_marker",
+    completion_transport: "claude_code_mod",
     completion_marker: completionMarker,
     marker_seen: false,
     start_seq: session.next_seq - 1,
@@ -1970,14 +2254,11 @@ async function waitForRequestCompletion(session, request, { idleMs, timeoutMs, s
       ? { reason: "hook", matched_hook: request.completion_event, waited_ms: 0 }
       : { reason: "already_terminal", waited_ms: 0 };
     request.last_wait = wait;
-    request.end_log_offset ||= fileSizeBytes(session.log_path);
-    persistInteractiveSession(session);
     return wait;
   }
-  let wait = await waitForInteractive(session, {
+  const wait = await waitForInteractive(session, {
     sinceSeq: request.start_seq,
-    untilTexts: [request.completion_marker],
-    untilHookEvents: ["Stop", "StopFailure"],
+    untilHookEvents: ["StopFailure"],
     wakeOnPermissionAttention: true,
     hookSinceOffset: request.hook_start_offset,
     hookRequestId: request.request_id,
@@ -1985,51 +2266,18 @@ async function waitForRequestCompletion(session, request, { idleMs, timeoutMs, s
     timeoutMs,
     strip,
   });
-  if (!requestIsPending(request)) {
-    request.last_wait = wait;
-    request.end_log_offset = fileSizeBytes(session.log_path);
-    persistInteractiveSession(session);
-    return wait;
-  }
-  if (wait.reason === "pattern") {
-    request.marker_seen = true;
-    if (session.hooks_active) {
-      const hookGrace = await waitForInteractive(session, {
-        sinceSeq: request.start_seq,
-        untilHookEvents: ["Stop", "StopFailure"],
-        hookSinceOffset: request.hook_start_offset,
-        hookRequestId: request.request_id,
-        timeoutMs: HOOK_COMPLETION_GRACE_MS,
-        strip,
-      });
-      if (!requestIsPending(request)) {
-        wait = { ...hookGrace, marker_seen_before_hook: true };
-        request.last_wait = wait;
-        request.end_log_offset = fileSizeBytes(session.log_path);
-        persistInteractiveSession(session);
-        return wait;
-      }
-      wait = { ...wait, hook_grace: hookGrace };
+  if (requestIsPending(request)) {
+    if (wait.reason === "exited") {
+      finalizeRequest(session, request, { status: "interrupted", terminalState: "process_exited" });
+    } else {
+      request.status = request.submitted_at ? "working" : "waiting";
+      request.terminal_state =
+        wait.reason === "idle"
+          ? "idle_without_completion"
+          : wait.reason === "idle_no_output"
+            ? "idle_without_output"
+            : wait.reason;
     }
-    finalizeRequest(session, request, {
-      status: "completed",
-      terminalState: "completed_with_marker",
-      markerSeen: true,
-    });
-  } else if (wait.reason === "exited") {
-    finalizeRequest(session, request, {
-      status: "interrupted",
-      terminalState: "process_exited",
-    });
-  } else {
-    request.status = request.submitted_at ? "working" : "waiting";
-    request.terminal_state =
-      wait.reason === "idle"
-        ? "idle_without_completion"
-        : wait.reason === "idle_no_output"
-          ? "idle_without_output"
-          : wait.reason;
-    persistInteractiveSession(session);
   }
   request.last_wait = wait;
   request.end_log_offset = fileSizeBytes(session.log_path);
@@ -2071,6 +2319,7 @@ async function startInteractiveClaude(rawInput) {
   if (!claudeInfo.available) throw new Error(`Claude Code is unavailable: ${claudeInfo.error || "unknown error"}`);
   const requiredCapabilities = [
     "settings",
+    "plugin_dir",
     "setting_sources",
     "append_system_prompt_file",
     "allowed_tools",
@@ -2086,7 +2335,9 @@ async function startInteractiveClaude(rawInput) {
       );
     }
   }
-  const claudeAuth = await claudeAuthPreflight.detectClaudeAuth(input.cwd);
+  const claudeAuth = await claudeAuthPreflight.detectClaudeAuth(input.cwd, {
+    settingSources: settingSourcesFor(input),
+  });
   if (!claudeAuth.ready) throw new Error(claudeAuthPreflight.formatPreflightError(claudeAuth));
   const interactiveId = uniqueInteractiveId();
   const logPath = path.join(INTERACTIVE_LOG_DIR, `${interactiveId}.log`);
@@ -2115,6 +2366,8 @@ async function startInteractiveClaude(rawInput) {
     instruction_context_path: hookRuntime.instructionContextPath,
   });
   const env = buildClaudeEnvironment();
+  env.CODEX_CLAUDE_SUBAGENT_OBSERVER_DIR = hookRuntime.observerEventDir;
+  env.CODEX_CLAUDE_SUBAGENT_OBSERVER_GENERATION = hookRuntime.observerGeneration;
   const cols = input.cols || 120;
   const rows = input.rows || 40;
   const ptyCommand = buildPtyBridgeCommand("claude", args, { cols, rows });
@@ -2156,6 +2409,10 @@ async function startInteractiveClaude(rawInput) {
     ready_at: null,
     ready_wait: null,
     hook_event_path: hookRuntime?.eventPath || null,
+    observer_event_dir: hookRuntime.observerEventDir,
+    observer_generation: hookRuntime.observerGeneration,
+    observer_ready: false,
+    observer_seq: 0,
     hook_file_generation: hookRuntime?.hookFileGeneration || null,
     hook_settings_path: hookRuntime?.settingsPath || null,
     instruction_context_path: hookRuntime?.instructionContextPath || null,
@@ -2202,6 +2459,8 @@ async function startInteractiveClaude(rawInput) {
     stopHookMonitor(session);
     const now = new Date().toISOString();
     session.status = "failed";
+    session.native_active_turn_id = null;
+    session.native_active_since = null;
     session.error = error.message;
     if (requestIsPending(session.active_request)) {
       finalizeRequest(session, session.active_request, {
@@ -2219,6 +2478,8 @@ async function startInteractiveClaude(rawInput) {
     stopHookMonitor(session);
     const now = new Date().toISOString();
     session.status = session.status === "failed" ? "failed" : "exited";
+    session.native_active_turn_id = null;
+    session.native_active_since = null;
     session.exit_code = code;
     session.signal = signal;
     if (requestIsPending(session.active_request)) {
@@ -2241,11 +2502,17 @@ async function startInteractiveClaude(rawInput) {
 const roleEnum = z.enum(["explorer", "reviewer", "security_reviewer", "critic", "architect", "implementer"]);
 
 const effortSchema = z.string().min(1);
-const permissionModeEnum = z.enum(["dontAsk", "plan"]);
+const permissionModeEnum = z.enum(["bypassPermissions"]);
 const mcpPresetEnum = z.enum(["auto", "none", "serena", "context7", "serena_context7"]);
 
 const interactiveSessionInput = {
   cwd: z.string().describe("Absolute path to the target project directory."),
+  subagent_mode: z
+    .enum(["disabled", "auto"])
+    .default("disabled")
+    .describe(
+      "disabled runs one Claude agent (default). Explicit auto permits native Agent delegation for implementer; distribution is Claude Code's decision. Read-only auto is currently rejected because custom-agent tool inheritance is not verified.",
+    ),
   role: roleEnum
     .default("reviewer")
     .describe(
@@ -2285,7 +2552,11 @@ const interactiveSessionInput = {
     .describe(
       "MCP behavior. auto uses normal project discovery; none uses a strict empty config. Named legacy presets also use project discovery.",
     ),
-  permission_mode: permissionModeEnum.optional().describe("Claude Code permission mode."),
+  permission_mode: permissionModeEnum
+    .optional()
+    .describe(
+      "Claude Code permission mode. All roles use bypassPermissions; interaction-required tools and policy can still need attention.",
+    ),
   name: z.string().optional().describe("Human-readable Claude session name."),
   claude_session_id: z
     .string()
@@ -2363,7 +2634,7 @@ server.registerTool(
   {
     title: "Request Interactive Claude Code",
     description:
-      "Submit one correlated Claude Code turn and wait for its Stop/StopFailure hook, with a completion-marker fallback. Idle and timeout returns remain resumable by request id.",
+      "Submit one correlated Claude Code main turn and wait for native turn.complete or StopFailure. done means main-turn completion, not acceptance of all work; inspect work_pending/count_unknown. Markers and silence never prove completion. Idle and timeout remain resumable by request id.",
     inputSchema: {
       cwd: z.string().describe("Absolute path to the same target project directory."),
       interactive_id: z.string().min(1).describe("Interactive session id from claude_interactive_start."),
@@ -2515,16 +2786,21 @@ server.registerTool(
     if (retry_submit && requestIsPending(request) && !request.submitted_at) {
       const releaseInput = acquireInteractiveInputLease(session, "claude_interactive_wait_request.retry_submit");
       try {
-        const sinceSeq = session.next_seq - 1;
-        await writeProcessStdin(session, "\r");
-        retrySubmit = await confirmInteractiveSubmit(session, sinceSeq, {
-          extraPattern: request.completion_marker,
-          hookSinceOffset: request.hook_start_offset,
-          hookCorrelationToken: request.hook_correlation_token,
-        });
-        if (retrySubmit.reason === "submitted" && requestIsPending(request)) {
-          request.status = "working";
-          request.submitted_at ||= new Date().toISOString();
+        refreshHookEvents(session);
+        refreshObserverEvents(session);
+        if (requestIsPending(request) && !request.submitted_at) {
+          assertNativeInputAvailable(session);
+          const sinceSeq = session.next_seq - 1;
+          await writeProcessStdin(session, "\r");
+          retrySubmit = await confirmInteractiveSubmit(session, sinceSeq, {
+            extraPattern: request.completion_marker,
+            hookSinceOffset: request.hook_start_offset,
+            hookCorrelationToken: request.hook_correlation_token,
+          });
+          if (retrySubmit.reason === "submitted" && requestIsPending(request)) {
+            request.status = "working";
+            request.submitted_at ||= new Date().toISOString();
+          }
         }
       } finally {
         releaseInput();
@@ -2636,6 +2912,7 @@ server.registerTool(
     const session = await requireInspectableSession(interactive_id, cwd);
     if (interactiveSessions.has(interactive_id)) {
       refreshHookEvents(session);
+      refreshObserverEvents(session);
       return textResult(
         compactInteractiveSession(session, {
           includeOutput: true,
@@ -2841,7 +3118,10 @@ server.registerTool(
         read_only_roles_mutate_files: false,
         implementer_requires_claude_worktree: false,
         implementer_filesystem_isolation: "none",
-        nested_subagents: false,
+        nested_subagents: "explicit_only",
+        default_subagent_mode: "disabled",
+        read_only_subagents: "unsupported_until_tool_inheritance_verified",
+        completion: "native_mod_turn_complete",
         request_boundary: "injected_by_role",
         forwards_allowlisted_interactive_claude_args: true,
         forbidden_claude_arg_flags: [...FORBIDDEN_CLAUDE_ARG_FLAGS],

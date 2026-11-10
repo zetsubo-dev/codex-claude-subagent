@@ -25,6 +25,9 @@ const releaseFiles = [
   "plugins/codex-claude-subagent/server.bundle.mjs",
   "plugins/codex-claude-subagent/scripts/hook_bridge.mjs",
   "plugins/codex-claude-subagent/scripts/pty_bridge.py",
+  "plugins/codex-claude-subagent/observer/.claude-plugin/plugin.json",
+  "plugins/codex-claude-subagent/observer/hooks/hooks.json",
+  "plugins/codex-claude-subagent/observer/hooks/register.mjs",
   "plugins/codex-claude-subagent/skills/codex-claude-subagent/SKILL.md",
 ];
 
@@ -51,14 +54,7 @@ fs.chmodSync(path.join(stagingDir, "Install.command"), 0o755);
 execFileSync("zip", ["-qr", archivePath, archiveName], { cwd: outputDir, stdio: "inherit" });
 
 const archiveEntries = execFileSync("unzip", ["-Z1", archivePath], { encoding: "utf8" });
-for (const requiredEntry of [
-  `${archiveName}/Install.command`,
-  `${archiveName}/LICENSE`,
-  `${archiveName}/.agents/plugins/marketplace.json`,
-  `${archiveName}/plugins/codex-claude-subagent/LICENSE`,
-  `${archiveName}/plugins/codex-claude-subagent/server.bundle.mjs`,
-  `${archiveName}/plugins/codex-claude-subagent/scripts/pty_bridge.py`,
-]) {
+for (const requiredEntry of releaseFiles.map((file) => `${archiveName}/${file}`)) {
   if (!archiveEntries.split("\n").includes(requiredEntry)) {
     throw new Error(`Release archive is missing ${requiredEntry}`);
   }

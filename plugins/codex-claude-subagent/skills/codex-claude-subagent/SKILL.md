@@ -51,8 +51,10 @@ as proof that Codex–Claude Subagent initialized.
   executable resolved through the host machine's `PATH` and uses the existing
   Claude Code `claude.ai` login. The default `auto` MCP preset preserves
   Claude Code's user, project, and local settings.
-- This plugin is a leaf subagent: nested Claude agents and team tools are not
-  exposed by default and are rejected when supplied as tool overrides.
+- This plugin runs one agent by default. Set `subagent_mode: "auto"` only when
+  the user explicitly asks Claude to use its own subagents. It is currently
+  supported for `implementer` only; read-only custom-agent tool inheritance is
+  not verified. Do not infer permission from role, model, or task complexity.
 - Start with `claude_interactive_start`.
 - `claude_interactive_start` performs a fresh subscription-authentication
   preflight before creating any PTY or saved session. API-billed authentication
@@ -74,7 +76,7 @@ as proof that Codex–Claude Subagent initialized.
   `request.next_action.timeout_ms`. The cumulative checkpoints are 5, 10, 15,
   20, 25, 30, 45, 60, and 90 minutes from request creation. Repeat until
   `request.next_action` is null and the request status is `completed`,
-  `failed`, or `interrupted`. A successful hook or marker returns immediately;
+  `failed`, or `interrupted`. Native completion or failure returns immediately;
   checkpoints are maximum waits, not sleeps. Do not resend the request text.
 - If the request is still pending at 90 minutes, it reports
   `long_running: true`, clears the automatic `next_action`, and returns
@@ -165,13 +167,15 @@ Exact-session resume intentionally requires the same `cwd` and `role`. If the
 user requests a different role, start a new Claude session with a compact
 handoff packet instead of claiming that the old conversation was resumed.
 
-`claude_interactive_request` uses session-local Claude Code hooks as the
-primary lifecycle signal. `UserPromptSubmit` confirms submission,
-`Stop` completes the current request, and `StopFailure` reports API
-failures. Codex–Claude Subagent passes these hooks through a private per-session
-`--settings` file; it does not modify the user's or project's Claude
-settings. A split completion marker remains as fallback when hooks are disabled
-or unavailable.
+`claude_interactive_request` uses a bundled passive observer Mod and native
+`turn.complete` for correlated main-turn completion. Settings hooks supply
+submission acknowledgement, failure and interaction notices, and background
+metadata. The observer passes events through unchanged and never disables
+user hooks. Stop, marker text, and silence alone cannot establish success.
+It requires Claude Code 2.1.322 or newer and a successful observer handshake.
+If Mods are blocked or observation is unavailable, report that condition;
+do not fall back to print mode or claim completion. User/project settings are
+not edited, and no constant 60-second wait is added to ordinary completions.
 
 The default idle fallback is 30 seconds and the normal request hard timeout is
 5 minutes. Idle and timeout returns keep the request pending. Resumed request
@@ -181,12 +185,12 @@ additional hard timeout. Every nonterminal response reports
 `claude_interactive_wait_request` until the 90-minute boundary. Follow that
 action and its timeout again after every timeout until it becomes null.
 The cumulative checkpoint schedule is 5, 10, 15, 20, 25, 30, 45, 60, and 90
-minutes; each wait returns immediately when a hook or completion marker arrives.
+minutes; each wait returns when correlated native completion or failure arrives.
 At 90 minutes, ask the user whether to continue or stop. Use
 `claude_interactive_wait_request` rather than
 sending another request; new request/send input is rejected until the pending
 request completes or the session stops. Codex–Claude Subagent also monitors hook files
-while the PTY is alive, so a late `Stop` updates persisted request state even
+while the PTY is alive, so a late native completion updates persisted request state even
 between MCP tool calls.
 
 After submission, a `Notification` with
@@ -195,8 +199,8 @@ After submission, a `Notification` with
 attention only. It does not release the pending request or change completion
 transport. It is a forward-only, non-durable response field. Resume with
 `claude_interactive_wait_request`, never by resending the original request
-text. The attention is cleared on resumed wait and on `Stop`, `StopFailure`, or
-completion-marker terminal state.
+text. Elicitation form and URL dialogs also report interaction attention.
+Attention is cleared on resumed wait or terminal completion.
 
 On first use of a project, Claude Code may show its MCP server selector before
 the input prompt. The worker handles this startup-only selector without
@@ -208,8 +212,17 @@ MCP. Do not send critic text while that selector is visible.
 follow-up input; it does not mean the latest review request is still working.
 For request-level state, check `request.status`, `request.done`,
 `request.completion_transport`, and `request.terminal_state`.
-`completed_with_stop_hook` and `completed_with_marker` are terminal
-successes. For a hook-completed request, prefer `request.result_text` as
+`completed_with_native_event` means the correlated main turn ended, not that
+all project work passed acceptance. `completion_scope` is `main_turn`.
+Inspect `work_pending`, `background_tasks_pending`, `count_unknown` and
+`stop_block_overridden`. Background work or unavailable counts do not keep
+the input locked after a native answer; Codex must verify expected jobs and
+artifacts itself. Future cron schedules are informational. Tokenless main
+turn outcomes are available as session `latest_native_outcome`; they never
+complete another request. While `native_active_turn_id` is set, use read/wait
+or stop instead of sending input. This pre-send check is best-effort, not an
+atomic lock inside Claude Code; no correlation means no claimed completion.
+Prefer `request.result_text` as
 Claude's final answer; use terminal logs for long/truncated output and audit
 context. Stop the session when no re-review will be sent.
 
@@ -222,7 +235,7 @@ context. Stop the session when no re-review will be sent.
 - `architect`: complex design and refactor planning.
 - `implementer`: implementation and verification directly in the target
   project directory. Defaults to `Edit`, `Write`, `Bash`, `Read`, `Grep`,
-  `Glob`, and `permission_mode: "dontAsk"`. Claude Code retains its normal
+  `Glob`, and `permission_mode: "bypassPermissions"`. Claude Code retains its normal
   edit, commit, push, and publish behavior.
 
 When `model` or `effort` is omitted, the plugin passes no corresponding CLI
@@ -238,12 +251,30 @@ target project directory.
 
 ## Model and Effort Selection
 
+Before starting, extract the user's requested role, model, effort, and whether
+native subagents were explicitly requested. Pass model/effort as tool fields,
+not merely in the prompt. For "Opus, high, independent review, single agent",
+use `role: "reviewer"`, `model: "opus"`, `effort: "high"`, and
+`subagent_mode: "disabled"`. Do not silently replace named models.
+For a plain review with no Claude request, do not delegate automatically.
+The default role is `reviewer`; unspecified model and effort remain omitted.
+An explicit plugin/skill selection also expresses intent to use this route.
+
 The calling agent may set `model` and `effort` on every new
 `claude_interactive_start`. `model` accepts any non-empty Claude Code alias or
 full model ID and `effort` accepts any non-empty value; both are passed through
 unchanged and validated by the installed Claude Code. This lets the caller use
 new Claude model or effort values without a plugin release. When either value
 is omitted, Claude Code's own default is used.
+
+Compare `resolved.requested_model` / `requested_effort` with `observed` when
+available. A request field is not an effective-setting measurement.
+`last_api_model` identifies only the final API response's model, and a
+`turn.step` effort observation can be changed by downstream Mods or limits.
+An inherited effort environment variable can outrank the CLI; conflicting
+explicit effort is rejected before launch. Do not guess fixed defaults from
+legacy `effortLevel` settings: newer models have their own effort defaults.
+Keep the same subagent mode when resuming unless the user requests a change.
 
 Use `claude_args` for the allowlisted Claude Code interactive flags and values.
 The live policy reports that list. Unknown flags are rejected; so are
@@ -255,6 +286,11 @@ MCP, tools, and session identity instead of repeating those flags in
 
 ## Safety Defaults
 
+All roles start with `permission_mode: "bypassPermissions"`. This is the only
+supported permission mode. Do not request `plan` or `dontAsk`. Interaction-required
+tools, organization policy, and protected operations may still need attention. Role boundaries
+remain instructions and tool exposure limits, not OS-level enforcement.
+
 The MCP contract is explicit in `codex_claude_subagent_info`: read-only roles
 have `mode: "read_only"`, `mutates_files: false`, and `requires_worktree: false`;
 `implementer` has `mode: "implementation"`, `mutates_files: true`, and
@@ -262,16 +298,16 @@ have `mode: "read_only"`, `mutates_files: false`, and `requires_worktree: false`
 role contract so another AI agent can select a role without relying on prose.
 
 Read-only roles use `Bash`, `Read`, `Grep`, and `Glob` with
-`permission_mode: "plan"` and `mcp_preset: "auto"`. Their boundary is injected
+`permission_mode: "bypassPermissions"` and `mcp_preset: "auto"`. Their boundary is injected
 into the session context and every `claude_interactive_request`; `Edit`,
-`Write`, known nested-agent tools, and mutating permission modes are rejected as
-overrides. Bash remains intended for non-mutating inspection only.
+`Write` and known nested-agent tools are rejected as overrides. Bash remains intended for non-mutating inspection only.
 
 The implementer boundary is injected in the same way and uses the target `cwd`.
 It uses `Bash`, `Read`, `Grep`, `Glob`, `Edit`, and `Write` with
-`permission_mode: "dontAsk"`. Commit, push, publish, and nested-agent tools
-are governed by Claude Code and the target project's instructions; the plugin
-does not add a worktree or commit/push restriction.
+`permission_mode: "bypassPermissions"`. Commit, push, and publish follow Claude
+Code and project instructions; no worktree or commit/push restriction is added.
+Native subagents require explicit `subagent_mode: "auto"` with implementer.
+Their allocation is Claude Code's decision. Teams are not enabled by the adapter.
 
 `auto` uses Claude Code's normal user, project, and local MCP discovery. The legacy
 `serena`, `context7`, and `serena_context7` preset names remain aliases for that

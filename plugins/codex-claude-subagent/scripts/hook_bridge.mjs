@@ -166,6 +166,9 @@ async function main() {
     error_details: truncate(parsed.error_details, 16000),
     last_assistant_message: assistantMessage.value,
     last_assistant_message_truncated: assistantMessage.truncated,
+    stop_hook_active: parsed.stop_hook_active === true,
+    background_tasks_pending: Array.isArray(parsed.background_tasks) ? parsed.background_tasks.length : null,
+    session_crons_pending: Array.isArray(parsed.session_crons) ? parsed.session_crons.length : null,
     prompt_request_token: promptRequestToken(parsed.prompt),
   };
   const line = `${JSON.stringify(event)}\n`;

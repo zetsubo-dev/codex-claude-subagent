@@ -8,7 +8,7 @@
     "deps:install": "pnpm install --frozen-lockfile",
     "build": "pnpm --filter codex-claude-subagent build",
     "check:contract": "node scripts/contract-check.mjs",
-    "validate:plugin": "python3 \"$HOME/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py\" plugins/codex-claude-subagent",
+    "validate:plugin": "node scripts/validate-plugin.mjs",
     "check:plugin": "pnpm --filter codex-claude-subagent check",
     "format": "oxfmt --write .",
     "format:check": "oxfmt --check .",
@@ -21,7 +21,7 @@
     "smoke:live": "CODEX_CLAUDE_SUBAGENT_RUN_LIVE=1 pnpm --filter codex-claude-subagent smoke:live --",
     "verify": "pnpm run check && pnpm test && pnpm run smoke:package",
     "release:package": "pnpm run build && pnpm run verify && node scripts/package-release.mjs",
-    "plugin:cachebuster": "python3 \"$HOME/.codex/skills/.system/plugin-creator/scripts/update_plugin_cachebuster.py\" plugins/codex-claude-subagent",
+    "plugin:cachebuster": "node scripts/update-cachebuster.mjs",
     "plugin:install": "codex plugin add codex-claude-subagent@codex-claude-subagent"
   },
   "devDependencies": {

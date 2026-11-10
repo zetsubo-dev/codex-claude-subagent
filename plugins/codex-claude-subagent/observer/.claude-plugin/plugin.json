@@ -1,0 +1,7 @@
+{
+  "name": "subagent-turn-observer",
+  "version": "0.1.0",
+  "description": "Passive lifecycle observation for Codex–Claude Subagent sessions.",
+  "license": "MIT",
+  "author": { "name": "zetsubo-dev" }
+}

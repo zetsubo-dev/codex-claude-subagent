@@ -69,7 +69,12 @@ assertContract(server.includes('name: "codex-claude-subagent"'), "server name");
 assertContract(server.includes("CODEX_CLAUDE_SUBAGENT_STATE_DIR"), "state environment prefix");
 assertContract(server.includes('const IMPLEMENTATION_ROLES = new Set(["implementer"])'), "implementer role contract");
 assertContract(!server.includes("claude_worktree is required"), "implementer worktree guard removed");
-assertContract(server.includes("nested_subagents: false"), "nested subagent policy");
+assertContract(server.includes('nested_subagents: "explicit_only"'), "explicit nested subagent policy");
+assertContract(server.includes('default_subagent_mode: "disabled"'), "single-agent default");
+assertContract(
+  fs.existsSync(path.join(rootDir, "plugins/codex-claude-subagent/observer/hooks/register.mjs")),
+  "native lifecycle observer",
+);
 assertContract(server.includes("forwards_allowlisted_interactive_claude_args: true"), "interactive Claude args policy");
 assertContract(fs.existsSync(installer), "release installer missing");
 assertContract((fs.statSync(installer).mode & 0o111) !== 0, "release installer must be executable");

@@ -3229,8 +3229,8 @@ var require_utils = __commonJS({
       }
       return ind;
     }
-    function removeDotSegments(path3) {
-      let input = path3;
+    function removeDotSegments(path4) {
+      let input = path4;
       const output = [];
       let nextSlash = -1;
       let len = 0;
@@ -3482,8 +3482,8 @@ var require_schemes = __commonJS({
         wsComponent.secure = void 0;
       }
       if (wsComponent.resourceName) {
-        const [path3, query] = wsComponent.resourceName.split("?");
-        wsComponent.path = path3 && path3 !== "/" ? path3 : void 0;
+        const [path4, query] = wsComponent.resourceName.split("?");
+        wsComponent.path = path4 && path4 !== "/" ? path4 : void 0;
         wsComponent.query = query;
         wsComponent.resourceName = void 0;
       }
@@ -6902,12 +6902,12 @@ var require_dist = __commonJS({
         throw new Error(`Unknown format "${name}"`);
       return f;
     };
-    function addFormats(ajv, list, fs3, exportName) {
+    function addFormats(ajv, list, fs4, exportName) {
       var _a;
       var _b;
       (_a = (_b = ajv.opts.code).formats) !== null && _a !== void 0 ? _a : _b.formats = (0, codegen_1._)`require("ajv-formats/dist/formats").${exportName}`;
       for (const f of list)
-        ajv.addFormat(f, fs3[f]);
+        ajv.addFormat(f, fs4[f]);
     }
     module.exports = exports = formatsPlugin;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -6918,9 +6918,9 @@ var require_dist = __commonJS({
 // server.mjs
 import { spawn as spawn2 } from "node:child_process";
 import crypto from "node:crypto";
-import fs2 from "node:fs";
+import fs3 from "node:fs";
 import os from "node:os";
-import path2 from "node:path";
+import path3 from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 
@@ -7283,8 +7283,8 @@ function getErrorMap() {
 
 // ../../node_modules/.pnpm/zod@3.25.76/node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
-  const { data, path: path3, errorMaps, issueData } = params;
-  const fullPath = [...path3, ...issueData.path || []];
+  const { data, path: path4, errorMaps, issueData } = params;
+  const fullPath = [...path4, ...issueData.path || []];
   const fullIssue = {
     ...issueData,
     path: fullPath
@@ -7399,11 +7399,11 @@ var errorUtil;
 
 // ../../node_modules/.pnpm/zod@3.25.76/node_modules/zod/v3/types.js
 var ParseInputLazyPath = class {
-  constructor(parent, value, path3, key) {
+  constructor(parent, value, path4, key) {
     this._cachedPath = [];
     this.parent = parent;
     this.data = value;
-    this._path = path3;
+    this._path = path4;
     this._key = key;
   }
   get path() {
@@ -10995,10 +10995,10 @@ function assignProp(target, prop, value) {
     configurable: true
   });
 }
-function getElementAtPath(obj, path3) {
-  if (!path3)
+function getElementAtPath(obj, path4) {
+  if (!path4)
     return obj;
-  return path3.reduce((acc, key) => acc?.[key], obj);
+  return path4.reduce((acc, key) => acc?.[key], obj);
 }
 function promiseAllObject(promisesObj) {
   const keys = Object.keys(promisesObj);
@@ -11318,11 +11318,11 @@ function aborted(x, startIndex = 0) {
   }
   return false;
 }
-function prefixIssues(path3, issues) {
+function prefixIssues(path4, issues) {
   return issues.map((iss) => {
     var _a;
     (_a = iss).path ?? (_a.path = []);
-    iss.path.unshift(path3);
+    iss.path.unshift(path4);
     return iss;
   });
 }
@@ -14733,11 +14733,11 @@ function normalizeObjectSchema(schema) {
   }
   return void 0;
 }
-function getDotPath(path3) {
-  if (path3.length === 0) {
+function getDotPath(path4) {
+  if (path4.length === 0) {
     return "object root";
   }
-  return path3.reduce((acc, seg, index) => {
+  return path4.reduce((acc, seg, index) => {
     if (index === 0) {
       return String(seg);
     }
@@ -21094,6 +21094,7 @@ ${help.stderr || ""}`;
               mcp_config: helpText.includes("--mcp-config"),
               strict_mcp_config: helpText.includes("--strict-mcp-config"),
               settings: helpText.includes("--settings"),
+              plugin_dir: helpText.includes("--plugin-dir"),
               setting_sources: helpText.includes("--setting-sources"),
               append_system_prompt_file: helpText.includes("--append-system-prompt-file") || helpText.includes("--append-system-prompt[-file]"),
               session_id: helpText.includes("--session-id"),
@@ -21187,15 +21188,16 @@ ${doctor.stderr || ""}`;
       success_condition: "claude auth status reports loggedIn=true with authMethod=claude.ai"
     };
   }
-  async function detectClaudeAuth(cwd = process.cwd()) {
+  async function detectClaudeAuth(cwd = process.cwd(), { settingSources = ["user", "project", "local"] } = {}) {
     const env = { ...buildEnvironment(), FORCE_COLOR: "0", NO_COLOR: "1" };
-    const status = await runClaudeCommand(["--setting-sources", "", "auth", "status", "--json"], {
+    const status = await runClaudeCommand(["--setting-sources", settingSources.join(","), "auth", "status", "--json"], {
       cwd,
       env,
       timeoutMs: statusTimeoutMs
     });
     const parsed = parseJsonObject(status.stdout);
-    const statusFailure = classifyCommandFailure(status, parsed);
+    const loggedOut = status.status === 1 && parsed?.loggedIn === false && !status.timed_out && !status.spawn_error;
+    const statusFailure = loggedOut ? null : classifyCommandFailure(status, parsed);
     const usableStatus = statusFailure === null ? parsed : null;
     const loggedIn = usableStatus?.loggedIn === true;
     const authMethod = normalizeMetadata(usableStatus?.authMethod);
@@ -21339,21 +21341,55 @@ function createSessionRegistrySupport({
   return { selectRetained, withLock };
 }
 
+// lib/observer.mjs
+import fs2 from "node:fs";
+import path2 from "node:path";
+function readObserverRecords(directory, generation, afterSeq) {
+  const records = [];
+  records.pending = false;
+  records.skipped_sequences = [];
+  let expected = afterSeq + 1;
+  const files = fs2.readdirSync(directory).filter((name) => /^event-\d{8}\.json$/.test(name)).sort().slice(0, 4096);
+  for (const [index, file] of files.entries()) {
+    if (Number(file.slice(6, 14)) <= afterSeq) continue;
+    const target = path2.join(directory, file);
+    const stat = fs2.lstatSync(target);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 512 * 1024) continue;
+    try {
+      const event = JSON.parse(fs2.readFileSync(target, "utf8"));
+      if (event.schema !== 1 || event.generation !== generation || !Number.isSafeInteger(event.seq) || event.seq <= afterSeq || event.seq !== Number(file.slice(6, 14)) || typeof event.session_id !== "string")
+        continue;
+      if (event.seq !== expected) records.skipped_sequences.push(expected);
+      records.push({ event, file: target });
+      expected = event.seq + 1;
+    } catch {
+      if (index + 1 < files.length) records.skipped_sequences.push(Number(file.slice(6, 14)));
+      else {
+        records.pending = true;
+        break;
+      }
+    }
+  }
+  return records;
+}
+
 // server.mjs
-var PLUGIN_DIR = path2.dirname(fileURLToPath(import.meta.url));
+var PLUGIN_DIR = path3.dirname(fileURLToPath(import.meta.url));
 var BASE_VERSION = "0.2.0";
 var VERSION = readPluginVersion();
-var PTY_BRIDGE_PATH = path2.join(PLUGIN_DIR, "scripts", "pty_bridge.py");
-var HOOK_BRIDGE_PATH = path2.join(PLUGIN_DIR, "scripts", "hook_bridge.mjs");
-var DEFAULT_STATE_DIR = path2.join(os.homedir(), ".codex", "codex-claude-subagent");
+var PTY_BRIDGE_PATH = path3.join(PLUGIN_DIR, "scripts", "pty_bridge.py");
+var HOOK_BRIDGE_PATH = path3.join(PLUGIN_DIR, "scripts", "hook_bridge.mjs");
+var DEFAULT_STATE_DIR = path3.join(os.homedir(), ".codex", "codex-claude-subagent");
 var STATE_DIR = process.env.CODEX_CLAUDE_SUBAGENT_STATE_DIR || DEFAULT_STATE_DIR;
-var INTERACTIVE_LOG_DIR = path2.join(STATE_DIR, "interactive-logs");
-var MCP_CONFIG_DIR = path2.join(STATE_DIR, "mcp-configs");
-var HOOK_EVENT_DIR = path2.join(STATE_DIR, "hook-events");
-var HOOK_SETTINGS_DIR = path2.join(STATE_DIR, "hook-settings");
-var INSTRUCTION_CONTEXT_DIR = path2.join(STATE_DIR, "instruction-contexts");
-var SESSION_REGISTRY_PATH = path2.join(STATE_DIR, "interactive-sessions.json");
-var SESSION_REGISTRY_LOCK_DIR = path2.join(STATE_DIR, "interactive-sessions.lock");
+var INTERACTIVE_LOG_DIR = path3.join(STATE_DIR, "interactive-logs");
+var MCP_CONFIG_DIR = path3.join(STATE_DIR, "mcp-configs");
+var HOOK_EVENT_DIR = path3.join(STATE_DIR, "hook-events");
+var HOOK_SETTINGS_DIR = path3.join(STATE_DIR, "hook-settings");
+var INSTRUCTION_CONTEXT_DIR = path3.join(STATE_DIR, "instruction-contexts");
+var OBSERVER_EVENT_DIR = path3.join(STATE_DIR, "observer-events");
+var OBSERVER_PLUGIN_DIR = path3.join(PLUGIN_DIR, "observer");
+var SESSION_REGISTRY_PATH = path3.join(STATE_DIR, "interactive-sessions.json");
+var SESSION_REGISTRY_LOCK_DIR = path3.join(STATE_DIR, "interactive-sessions.lock");
 var INSTANCE_ID = crypto.randomUUID();
 var INSTANCE_STARTED_AT = (/* @__PURE__ */ new Date()).toISOString();
 var MAX_TAIL_CHARS = 2e4;
@@ -21499,7 +21535,7 @@ var ROLE_PROFILES = {
     tools: READ_ONLY_BUILTIN_TOOLS,
     allowedTools: READ_ONLY_ALLOWED_TOOLS,
     disallowedTools: [],
-    permissionMode: "plan"
+    permissionMode: "bypassPermissions"
   },
   reviewer: {
     mode: "read_only",
@@ -21510,7 +21546,7 @@ var ROLE_PROFILES = {
     tools: READ_ONLY_BUILTIN_TOOLS,
     allowedTools: READ_ONLY_ALLOWED_TOOLS,
     disallowedTools: [],
-    permissionMode: "plan"
+    permissionMode: "bypassPermissions"
   },
   security_reviewer: {
     mode: "read_only",
@@ -21521,7 +21557,7 @@ var ROLE_PROFILES = {
     tools: READ_ONLY_BUILTIN_TOOLS,
     allowedTools: READ_ONLY_ALLOWED_TOOLS,
     disallowedTools: [],
-    permissionMode: "plan"
+    permissionMode: "bypassPermissions"
   },
   critic: {
     mode: "read_only",
@@ -21532,7 +21568,7 @@ var ROLE_PROFILES = {
     tools: READ_ONLY_BUILTIN_TOOLS,
     allowedTools: READ_ONLY_ALLOWED_TOOLS,
     disallowedTools: [],
-    permissionMode: "plan"
+    permissionMode: "bypassPermissions"
   },
   architect: {
     mode: "read_only",
@@ -21543,7 +21579,7 @@ var ROLE_PROFILES = {
     tools: READ_ONLY_BUILTIN_TOOLS,
     allowedTools: READ_ONLY_ALLOWED_TOOLS,
     disallowedTools: [],
-    permissionMode: "plan"
+    permissionMode: "bypassPermissions"
   },
   implementer: {
     mode: "implementation",
@@ -21554,7 +21590,7 @@ var ROLE_PROFILES = {
     tools: IMPLEMENTER_BUILTIN_TOOLS,
     allowedTools: IMPLEMENTER_ALLOWED_TOOLS,
     disallowedTools: [],
-    permissionMode: "dontAsk"
+    permissionMode: "bypassPermissions"
   }
 };
 var interactiveSessions = /* @__PURE__ */ new Map();
@@ -21599,7 +21635,7 @@ function parseWaitScheduleMs(rawValue) {
 }
 function readPluginVersion() {
   try {
-    const manifest = JSON.parse(fs2.readFileSync(path2.join(PLUGIN_DIR, ".codex-plugin", "plugin.json"), "utf8"));
+    const manifest = JSON.parse(fs3.readFileSync(path3.join(PLUGIN_DIR, ".codex-plugin", "plugin.json"), "utf8"));
     return typeof manifest.version === "string" && manifest.version ? manifest.version : BASE_VERSION;
   } catch {
     return BASE_VERSION;
@@ -21607,35 +21643,37 @@ function readPluginVersion() {
 }
 function ensureState() {
   ensureNotSymlink(STATE_DIR);
-  fs2.mkdirSync(STATE_DIR, { recursive: true, mode: PRIVATE_DIR_MODE });
+  fs3.mkdirSync(STATE_DIR, { recursive: true, mode: PRIVATE_DIR_MODE });
   chmodBestEffort(STATE_DIR, PRIVATE_DIR_MODE);
   ensureNotSymlink(INTERACTIVE_LOG_DIR);
-  fs2.mkdirSync(INTERACTIVE_LOG_DIR, { recursive: true, mode: PRIVATE_DIR_MODE });
+  fs3.mkdirSync(INTERACTIVE_LOG_DIR, { recursive: true, mode: PRIVATE_DIR_MODE });
   chmodBestEffort(INTERACTIVE_LOG_DIR, PRIVATE_DIR_MODE);
   ensureNotSymlink(MCP_CONFIG_DIR);
-  fs2.mkdirSync(MCP_CONFIG_DIR, { recursive: true, mode: PRIVATE_DIR_MODE });
+  fs3.mkdirSync(MCP_CONFIG_DIR, { recursive: true, mode: PRIVATE_DIR_MODE });
   chmodBestEffort(MCP_CONFIG_DIR, PRIVATE_DIR_MODE);
   ensureNotSymlink(HOOK_EVENT_DIR);
-  fs2.mkdirSync(HOOK_EVENT_DIR, { recursive: true, mode: PRIVATE_DIR_MODE });
+  fs3.mkdirSync(HOOK_EVENT_DIR, { recursive: true, mode: PRIVATE_DIR_MODE });
   chmodBestEffort(HOOK_EVENT_DIR, PRIVATE_DIR_MODE);
   ensureNotSymlink(HOOK_SETTINGS_DIR);
-  fs2.mkdirSync(HOOK_SETTINGS_DIR, { recursive: true, mode: PRIVATE_DIR_MODE });
+  fs3.mkdirSync(HOOK_SETTINGS_DIR, { recursive: true, mode: PRIVATE_DIR_MODE });
   chmodBestEffort(HOOK_SETTINGS_DIR, PRIVATE_DIR_MODE);
   ensureNotSymlink(INSTRUCTION_CONTEXT_DIR);
-  fs2.mkdirSync(INSTRUCTION_CONTEXT_DIR, { recursive: true, mode: PRIVATE_DIR_MODE });
+  fs3.mkdirSync(INSTRUCTION_CONTEXT_DIR, { recursive: true, mode: PRIVATE_DIR_MODE });
   chmodBestEffort(INSTRUCTION_CONTEXT_DIR, PRIVATE_DIR_MODE);
+  ensureNotSymlink(OBSERVER_EVENT_DIR);
+  fs3.mkdirSync(OBSERVER_EVENT_DIR, { recursive: true, mode: PRIVATE_DIR_MODE });
   ensureNotSymlink(SESSION_REGISTRY_PATH);
   ensureNotSymlink(SESSION_REGISTRY_LOCK_DIR);
 }
 function ensureNotSymlink(targetPath) {
-  const stat = fs2.lstatSync(targetPath, { throwIfNoEntry: false });
+  const stat = fs3.lstatSync(targetPath, { throwIfNoEntry: false });
   if (stat?.isSymbolicLink()) {
     throw new Error(`Refusing to use symlinked Codex\u2013Claude Subagent state path: ${targetPath}`);
   }
 }
 function chmodBestEffort(targetPath, mode) {
   try {
-    fs2.chmodSync(targetPath, mode);
+    fs3.chmodSync(targetPath, mode);
   } catch {
   }
 }
@@ -21652,10 +21690,10 @@ function processIsAlive(pid) {
   }
 }
 function readRegistryMapUnsafe() {
-  if (!fs2.existsSync(SESSION_REGISTRY_PATH)) return /* @__PURE__ */ new Map();
+  if (!fs3.existsSync(SESSION_REGISTRY_PATH)) return /* @__PURE__ */ new Map();
   let parsed;
   try {
-    parsed = JSON.parse(fs2.readFileSync(SESSION_REGISTRY_PATH, "utf8"));
+    parsed = JSON.parse(fs3.readFileSync(SESSION_REGISTRY_PATH, "utf8"));
   } catch (error2) {
     throw new Error(`Could not parse Codex\u2013Claude Subagent session registry: ${error2.message}`, { cause: error2 });
   }
@@ -21668,16 +21706,20 @@ function readRegistryMapUnsafe() {
 }
 function removeOwnedArtifact(filePath, directory) {
   if (!filePath || typeof filePath !== "string") return;
-  const resolved = path2.resolve(filePath);
-  if (!isPathWithin(path2.resolve(directory), resolved)) return;
-  const stat = fs2.lstatSync(resolved, { throwIfNoEntry: false });
-  if (stat?.isFile() && !stat.isSymbolicLink()) fs2.rmSync(resolved, { force: true });
+  const resolved = path3.resolve(filePath);
+  if (!isPathWithin(path3.resolve(directory), resolved)) return;
+  const stat = fs3.lstatSync(resolved, { throwIfNoEntry: false });
+  if (stat?.isFile() && !stat.isSymbolicLink()) fs3.rmSync(resolved, { force: true });
 }
 function cleanupSessionArtifacts(record2) {
   removeOwnedArtifact(record2.log_path, INTERACTIVE_LOG_DIR);
   removeOwnedArtifact(record2.hook_event_path, HOOK_EVENT_DIR);
   removeOwnedArtifact(record2.hook_settings_path, HOOK_SETTINGS_DIR);
   removeOwnedArtifact(record2.instruction_context_path, INSTRUCTION_CONTEXT_DIR);
+  if (record2.observer_event_dir && path3.dirname(record2.observer_event_dir) === OBSERVER_EVENT_DIR && /^clint_[a-z0-9_]+$/.test(path3.basename(record2.observer_event_dir))) {
+    const stat = fs3.lstatSync(record2.observer_event_dir, { throwIfNoEntry: false });
+    if (stat?.isDirectory() && !stat.isSymbolicLink()) fs3.rmSync(record2.observer_event_dir, { recursive: true });
+  }
 }
 function sessionArtifactSizeBytes(record2) {
   return [record2.log_path, record2.hook_event_path, record2.hook_settings_path, record2.instruction_context_path].reduce(
@@ -21689,9 +21731,9 @@ function writeRegistryMapUnsafe(registry2) {
   const { retained: sessions, evicted } = sessionRegistrySupport.selectRetained(registry2.values());
   const payload = JSON.stringify({ sessions }, null, 2);
   const tmpPath = `${SESSION_REGISTRY_PATH}.${process.pid}.${INSTANCE_ID}.tmp`;
-  fs2.writeFileSync(tmpPath, payload, { mode: PRIVATE_FILE_MODE });
+  fs3.writeFileSync(tmpPath, payload, { mode: PRIVATE_FILE_MODE });
   chmodBestEffort(tmpPath, PRIVATE_FILE_MODE);
-  fs2.renameSync(tmpPath, SESSION_REGISTRY_PATH);
+  fs3.renameSync(tmpPath, SESSION_REGISTRY_PATH);
   for (const record2 of evicted) {
     try {
       cleanupSessionArtifacts(record2);
@@ -21815,6 +21857,10 @@ function persistInteractiveSession(session) {
     hook_file_generation: session.hook_file_generation,
     hook_settings_path: session.hook_settings_path,
     instruction_context_path: session.instruction_context_path,
+    observer_event_dir: session.observer_event_dir,
+    native_active_turn_id: session.native_active_turn_id || null,
+    native_active_since: session.native_active_since || null,
+    latest_native_outcome: session.latest_native_outcome || null,
     hooks_active: session.hooks_active,
     last_hook_event: session.last_hook_event,
     active_request: compactRequest(session.active_request),
@@ -21879,16 +21925,16 @@ function tailChunksByChars(chunks, maxChars) {
 }
 function fileSizeBytes(filePath) {
   if (!filePath) return 0;
-  const stat = fs2.statSync(filePath, { throwIfNoEntry: false });
+  const stat = fs3.statSync(filePath, { throwIfNoEntry: false });
   return stat?.isFile() ? stat.size : 0;
 }
 function readHookFileGeneration(filePath) {
   const size = Math.min(fileSizeBytes(filePath), 512);
   if (!size) return null;
-  const fd = fs2.openSync(filePath, "r");
+  const fd = fs3.openSync(filePath, "r");
   try {
     const buffer = Buffer.alloc(size);
-    const bytesRead = fs2.readSync(fd, buffer, 0, buffer.length, 0);
+    const bytesRead = fs3.readSync(fd, buffer, 0, buffer.length, 0);
     const newline = buffer.subarray(0, bytesRead).indexOf(10);
     if (newline === -1) return null;
     const header = JSON.parse(buffer.subarray(0, newline).toString("utf8"));
@@ -21896,21 +21942,21 @@ function readHookFileGeneration(filePath) {
   } catch {
     return null;
   } finally {
-    fs2.closeSync(fd);
+    fs3.closeSync(fd);
   }
 }
 function requireAbsoluteExistingDirectory(cwd) {
   if (!cwd || typeof cwd !== "string") {
     throw new Error("cwd is required and must be an absolute path to the target project directory.");
   }
-  if (!path2.isAbsolute(cwd)) {
+  if (!path3.isAbsolute(cwd)) {
     throw new Error(`cwd must be absolute: ${cwd}`);
   }
-  const stat = fs2.statSync(cwd, { throwIfNoEntry: false });
+  const stat = fs3.statSync(cwd, { throwIfNoEntry: false });
   if (!stat || !stat.isDirectory()) {
     throw new Error(`cwd does not exist or is not a directory: ${cwd}`);
   }
-  return fs2.realpathSync(cwd);
+  return fs3.realpathSync(cwd);
 }
 function assertSessionCwd(session, cwd) {
   const canonicalCwd = requireAbsoluteExistingDirectory(cwd);
@@ -21957,6 +22003,9 @@ function roleProfilesForInfo() {
 function defaultMcpPresetForRole() {
   return DEFAULT_READ_ONLY_MCP_PRESET;
 }
+function settingSourcesFor(input = {}) {
+  return input.mcp_preset === "none" ? [] : ["user", "project", "local"];
+}
 function writePrivateMcpConfig(config2, digestInput) {
   ensureState();
   const digest = crypto.createHash("sha256").update(
@@ -21965,22 +22014,22 @@ function writePrivateMcpConfig(config2, digestInput) {
       config: config2
     })
   ).digest("hex").slice(0, 24);
-  const configPath = path2.join(MCP_CONFIG_DIR, `${digest}.json`);
-  fs2.writeFileSync(configPath, JSON.stringify(config2, null, 2), { mode: PRIVATE_FILE_MODE });
+  const configPath = path3.join(MCP_CONFIG_DIR, `${digest}.json`);
+  fs3.writeFileSync(configPath, JSON.stringify(config2, null, 2), { mode: PRIVATE_FILE_MODE });
   chmodBestEffort(configPath, PRIVATE_FILE_MODE);
   prunePrivateMcpConfigs(configPath);
   return configPath;
 }
 function prunePrivateMcpConfigs(activePath) {
-  const files = fs2.readdirSync(MCP_CONFIG_DIR, { withFileTypes: true }).filter((entry) => entry.isFile() && !entry.isSymbolicLink() && entry.name.endsWith(".json")).map((entry) => {
-    const filePath = path2.join(MCP_CONFIG_DIR, entry.name);
-    return { filePath, mtimeMs: fs2.statSync(filePath).mtimeMs };
+  const files = fs3.readdirSync(MCP_CONFIG_DIR, { withFileTypes: true }).filter((entry) => entry.isFile() && !entry.isSymbolicLink() && entry.name.endsWith(".json")).map((entry) => {
+    const filePath = path3.join(MCP_CONFIG_DIR, entry.name);
+    return { filePath, mtimeMs: fs3.statSync(filePath).mtimeMs };
   }).sort((left, right) => right.mtimeMs - left.mtimeMs);
   const retained = /* @__PURE__ */ new Set([activePath, ...files.slice(0, MAX_MCP_CONFIG_FILES).map(({ filePath }) => filePath)]);
   for (const { filePath } of files) {
     if (!retained.has(filePath)) {
       try {
-        fs2.rmSync(filePath, { force: true });
+        fs3.rmSync(filePath, { force: true });
       } catch {
       }
     }
@@ -21991,22 +22040,32 @@ function instructionBoundaryForRole(role) {
 }
 function writeInstructionContext(interactiveId, role) {
   ensureState();
-  const contextPath = path2.join(INSTRUCTION_CONTEXT_DIR, `${interactiveId}.md`);
+  const contextPath = path3.join(INSTRUCTION_CONTEXT_DIR, `${interactiveId}.md`);
   ensureNotSymlink(contextPath);
-  fs2.writeFileSync(contextPath, `${instructionBoundaryForRole(role)}
+  fs3.writeFileSync(contextPath, `${instructionBoundaryForRole(role)}
 `, { mode: PRIVATE_FILE_MODE, flag: "wx" });
   chmodBestEffort(contextPath, PRIVATE_FILE_MODE);
   return contextPath;
 }
 function createHookRuntime(interactiveId, role) {
   ensureState();
-  const eventPath = path2.join(HOOK_EVENT_DIR, `${interactiveId}.jsonl`);
-  const settingsPath = path2.join(HOOK_SETTINGS_DIR, `${interactiveId}.json`);
+  const observerEventDir = path3.join(OBSERVER_EVENT_DIR, interactiveId);
+  fs3.mkdirSync(observerEventDir, { mode: PRIVATE_DIR_MODE });
+  const observerPluginDir = path3.join(observerEventDir, "plugin");
+  for (const relative of [".claude-plugin/plugin.json", "hooks/hooks.json", "hooks/register.mjs"]) {
+    const target = path3.join(observerPluginDir, relative);
+    fs3.mkdirSync(path3.dirname(target), { recursive: true, mode: PRIVATE_DIR_MODE });
+    fs3.copyFileSync(path3.join(OBSERVER_PLUGIN_DIR, relative), target, fs3.constants.COPYFILE_EXCL);
+    chmodBestEffort(target, PRIVATE_FILE_MODE);
+  }
+  const observerGeneration = crypto.randomUUID();
+  const eventPath = path3.join(HOOK_EVENT_DIR, `${interactiveId}.jsonl`);
+  const settingsPath = path3.join(HOOK_SETTINGS_DIR, `${interactiveId}.json`);
   const instructionContextPath = writeInstructionContext(interactiveId, role);
   const hookFileGeneration = crypto.randomUUID();
   ensureNotSymlink(eventPath);
   ensureNotSymlink(settingsPath);
-  fs2.writeFileSync(eventPath, `${JSON.stringify({ [HOOK_FILE_GENERATION_FIELD]: hookFileGeneration })}
+  fs3.writeFileSync(eventPath, `${JSON.stringify({ [HOOK_FILE_GENERATION_FIELD]: hookFileGeneration })}
 `, {
     mode: PRIVATE_FILE_MODE,
     flag: "wx"
@@ -22027,13 +22086,24 @@ function createHookRuntime(interactiveId, role) {
     ];
   }
   const settings = { hooks };
-  fs2.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), {
+  try {
+    const configDir = process.env.CLAUDE_CONFIG_DIR || path3.join(os.homedir(), ".claude");
+    const userSettings = JSON.parse(fs3.readFileSync(path3.join(configDir, "settings.json"), "utf8"));
+    if (userSettings.skipDangerousModePermissionPrompt === true) {
+      settings.skipDangerousModePermissionPrompt = true;
+    }
+  } catch {
+  }
+  fs3.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), {
     mode: PRIVATE_FILE_MODE,
     flag: "wx"
   });
   chmodBestEffort(eventPath, PRIVATE_FILE_MODE);
   chmodBestEffort(settingsPath, PRIVATE_FILE_MODE);
   return {
+    observerEventDir,
+    observerPluginDir,
+    observerGeneration,
     eventPath,
     settingsPath,
     hookFileGeneration,
@@ -22068,14 +22138,27 @@ function resolveMcpSettings({ mcp_preset }) {
     }
   };
 }
-function startupMcpSelectorVisible(session) {
-  const recentOutput = stripAnsi(session.output_tail || "").slice(-12e3);
+function startupMcpSelectorVisible(session, sinceSeq = 0) {
+  const recentOutput = interactiveTextSince(session, sinceSeq, { strip: true }).slice(-12e3);
   return STARTUP_MCP_SELECTOR_RE.test(recentOutput);
+}
+function assertNoStartupDialog(session, sinceSeq) {
+  const text = interactiveTextSince(session, sinceSeq, { strip: true }).replace(/\s+/g, "").toLowerCase();
+  if (text.includes("yes,itrustthisfolder") && (text.includes("no,exit") || text.includes("quicksafetycheck"))) {
+    throw new Error(
+      `Claude Code is waiting for workspace trust. No request was sent. Open Claude Code in ${session.cwd}, review the folder trust prompt, then retry in a new session.`
+    );
+  }
+  if (text.includes("yes,iaccept") && (text.includes("no,exit") || text.includes("bypasspermissionsmode"))) {
+    throw new Error(
+      "Claude Code is waiting for the bypass-permissions warning. No request was sent. Run claude --permission-mode bypassPermissions in your terminal and review the warning, then retry in a new session."
+    );
+  }
 }
 function resolveToolPermissions({ profile, allowed_tools, disallowed_tools }) {
   const baseAllowedTools = allowed_tools === null ? [] : allowed_tools || profile.allowedTools || profile.tools || [];
   const baseDisallowedTools = disallowed_tools === null ? [] : disallowed_tools || profile.disallowedTools || [];
-  return { resolvedAllowedTools: baseAllowedTools, resolvedDisallowedTools: baseDisallowedTools };
+  return { resolvedAllowedTools: [...baseAllowedTools], resolvedDisallowedTools: [...baseDisallowedTools] };
 }
 function flagName(argument) {
   const value = String(argument);
@@ -22119,13 +22202,30 @@ function assertForwardedClaudeArgs(claudeArgs) {
 function assertSafeOverrides(input) {
   const role = input.role || "reviewer";
   const profile = profileFor(role);
+  const subagentMode = input.subagent_mode || "disabled";
+  if (subagentMode === "auto" && READ_ONLY_ROLES.has(role)) {
+    throw new Error(
+      "subagent_mode=auto is currently supported only for implementer; custom-agent read-only tool inheritance is not verified."
+    );
+  }
+  if (subagentMode === "auto" && input.tools && !input.tools.some((tool) => ["Agent", "Task", "default"].includes(tool))) {
+    throw new Error("subagent_mode=auto conflicts with the explicit tools list: include Agent or choose disabled.");
+  }
+  if (subagentMode === "auto" && input.disallowed_tools?.some((tool) => /^(?:Agent|Task)(?:$|[(:])/.test(tool))) {
+    throw new Error("subagent_mode=auto conflicts with the explicit delegation deny list.");
+  }
+  if (input.effort && process.env.CLAUDE_CODE_EFFORT_LEVEL && input.effort !== process.env.CLAUDE_CODE_EFFORT_LEVEL) {
+    throw new Error(
+      "Explicit effort conflicts with inherited CLAUDE_CODE_EFFORT_LEVEL, which Claude Code prioritizes over --effort. Resolve that environment setting before starting; no session was created."
+    );
+  }
   assertForwardedClaudeArgs(input.claude_args);
   const nestedAgentOverride = [...input.tools || [], ...input.allowed_tools || []].find(
-    (tool) => NESTED_AGENT_TOOL_PATTERN.test(String(tool))
+    (tool) => NESTED_AGENT_TOOL_PATTERN.test(String(tool)) && (subagentMode !== "auto" || /^(?:Team|SendMessage)/.test(tool))
   );
   if (nestedAgentOverride) {
     throw new Error(
-      `Nested agent tool '${nestedAgentOverride}' is not allowed; Codex\u2013Claude Subagent is a leaf subagent.`
+      `Nested agent tool '${nestedAgentOverride}' is not allowed in this mode; the default is a leaf subagent.`
     );
   }
   if (READ_ONLY_ROLES.has(role)) {
@@ -22203,14 +22303,17 @@ function buildInteractiveArgs(input, hookRuntime) {
   const resolvedModel = input.model || null;
   const resolvedEffort = input.effort || null;
   const resolvedFallback = null;
-  const resolvedTools = input.tools === null ? [] : input.tools || profile.tools;
+  const subagentMode = input.subagent_mode || "disabled";
+  const defaultTools = subagentMode === "auto" ? [...profile.tools, "Agent"] : profile.tools;
+  const resolvedTools = input.tools === null ? [] : input.tools || defaultTools;
   const mcpSettings = resolveMcpSettings({ mcp_preset: input.mcp_preset });
-  const settingSources = mcpSettings.preset === "none" ? [] : ["user", "project", "local"];
+  const settingSources = settingSourcesFor(input);
   const { resolvedAllowedTools, resolvedDisallowedTools } = resolveToolPermissions({
     profile,
     allowed_tools: input.allowed_tools,
     disallowed_tools: input.disallowed_tools
   });
+  if (subagentMode === "disabled") resolvedDisallowedTools.push("Agent", "Task");
   const resolvedPermissionMode = input.permission_mode || profile.permissionMode;
   if (input.name) args.push("--name", input.name);
   if (resumeMode === "resume") {
@@ -22224,6 +22327,7 @@ function buildInteractiveArgs(input, hookRuntime) {
   args.push("--setting-sources", settingSources.join(","));
   if (hookRuntime?.useSettings) args.push("--settings", hookRuntime.settingsPath);
   args.push("--append-system-prompt-file", hookRuntime.instructionContextPath);
+  args.push("--plugin-dir", hookRuntime.observerPluginDir);
   pushCsvArg(args, "--tools", resolvedTools, { allowEmpty: true });
   pushCsvArg(args, "--allowedTools", resolvedAllowedTools);
   pushCsvArg(args, "--disallowedTools", resolvedDisallowedTools);
@@ -22247,13 +22351,17 @@ function buildInteractiveArgs(input, hookRuntime) {
       mcp_config: mcpSettings.config,
       permission_mode: resolvedPermissionMode,
       role: input.role || "reviewer",
+      subagent_mode: subagentMode,
+      requested_model: resolvedModel,
+      requested_effort: resolvedEffort,
+      observed: null,
       mode: profile.mode,
       purpose: profile.purpose,
       mutates_files: profile.mutatesFiles,
       requires_worktree: profile.requiresWorktree,
       filesystem_isolation: profile.filesystemIsolation,
       claude_args: input.claude_args || [],
-      completion_transport: hookRuntime ? "claude_code_hooks_with_marker_fallback" : "completion_marker"
+      completion_transport: "claude_code_mod"
     }
   };
 }
@@ -22261,14 +22369,14 @@ function createBoundedLogWriter(filePath) {
   let bytesWritten = 0;
   let truncated = false;
   let closed = false;
-  const existing = fs2.statSync(filePath, { throwIfNoEntry: false });
+  const existing = fs3.statSync(filePath, { throwIfNoEntry: false });
   if (existing) bytesWritten = existing.size;
-  const fd = fs2.openSync(filePath, "a", PRIVATE_FILE_MODE);
+  const fd = fs3.openSync(filePath, "a", PRIVATE_FILE_MODE);
   const writeBuffer = (buffer) => {
     if (closed) return;
     let offset = 0;
     while (offset < buffer.length) {
-      const written = fs2.writeSync(fd, buffer, offset, buffer.length - offset);
+      const written = fs3.writeSync(fd, buffer, offset, buffer.length - offset);
       if (written <= 0) throw new Error(`Could not append Codex\u2013Claude Subagent log ${filePath}.`);
       offset += written;
     }
@@ -22299,7 +22407,7 @@ function createBoundedLogWriter(filePath) {
     },
     end() {
       if (closed) return;
-      fs2.closeSync(fd);
+      fs3.closeSync(fd);
       closed = true;
     }
   };
@@ -22343,17 +22451,17 @@ function readInteractiveLog(session, { offset = 0, maxBytes = null, tailBytes = 
   let startOffset = requestedOffset;
   let endOffset = requestedOffset;
   if (readableBytes > 0) {
-    const fd = fs2.openSync(session.log_path, "r");
+    const fd = fs3.openSync(session.log_path, "r");
     try {
       const buffer = Buffer.alloc(readableBytes);
-      const probedBytes = fs2.readSync(fd, buffer, 0, readableBytes, requestedOffset);
+      const probedBytes = fs3.readSync(fd, buffer, 0, readableBytes, requestedOffset);
       const safe = safeUtf8Slice(buffer.subarray(0, probedBytes), effectiveMaxBytes);
       const slice = buffer.subarray(safe.start, safe.end);
       startOffset = requestedOffset + safe.start;
       endOffset = requestedOffset + safe.end;
       text = slice.toString("utf8");
     } finally {
-      fs2.closeSync(fd);
+      fs3.closeSync(fd);
     }
   }
   return {
@@ -22415,13 +22523,22 @@ function compactRequest(request, { includePermissionAttention = false } = {}) {
   if (!request) return null;
   const pending = requestIsPending(request);
   const waitPolicy = pending ? requestWaitPolicy(request) : null;
-  const waitRequired = pending && !waitPolicy.long_running;
+  const waitRequired = pending && !waitPolicy.long_running && !request.attention_required;
   const compacted = {
     request_id: request.request_id,
     status: request.status,
     done: request.done,
     terminal_state: request.terminal_state,
     completion_transport: request.completion_transport,
+    completion_confirmation: request.completion_confirmation || null,
+    completion_scope: "main_turn",
+    work_pending: request.background_tasks_pending > 0,
+    count_unknown: request.background_tasks_pending == null,
+    stop_block_overridden: request.stop_block_overridden ?? null,
+    observed: request.observed || null,
+    background_tasks_pending: request.background_tasks_pending ?? null,
+    session_crons_pending: request.session_crons_pending ?? null,
+    provisional_result_text: request.provisional_result_text || null,
     completion_marker: request.completion_marker,
     marker_seen: request.marker_seen,
     start_seq: request.start_seq,
@@ -22462,7 +22579,7 @@ function compactRequest(request, { includePermissionAttention = false } = {}) {
       continue_requires_explicit_timeout_ms: true,
       stop_tool: "claude_interactive_stop",
       instruction: "The request is still active after the 90-minute schedule. Ask the user whether to continue waiting or stop; do not resend the request text."
-    } : null
+    } : request.attention_required || null
   };
   if (includePermissionAttention) compacted.permission_attention = request.permission_attention || null;
   return compacted;
@@ -22486,19 +22603,129 @@ function permissionAttentionKey(event) {
 }
 function finalizeRequest(session, request, { status, terminalState, markerSeen = request.marker_seen || false, event = null }) {
   const now = (/* @__PURE__ */ new Date()).toISOString();
+  markerSeen ||= interactiveTextSince(session, request.start_seq).includes(request.completion_marker);
   request.status = status;
   request.done = status === "completed";
   request.terminal_state = terminalState;
   request.marker_seen = markerSeen;
   request.completion_event = event;
+  request.attention_required = null;
   clearPermissionAttention(request);
-  request.completion_transport = event?.hook_event_name === "Stop" ? "claude_code_stop_hook" : event?.hook_event_name === "StopFailure" ? "claude_code_stop_failure_hook" : markerSeen ? "completion_marker" : request.completion_transport;
+  request.completion_transport = event?.hook_event_name === "turn.complete" ? "claude_code_mod" : event?.hook_event_name === "Stop" ? "claude_code_stop_hook" : event?.hook_event_name === "StopFailure" ? "claude_code_stop_failure_hook" : request.completion_transport;
   request.completed_at = now;
   request.end_log_offset = fileSizeBytes(session.log_path);
   session.last_request = request;
   if (session.active_request?.request_id === request.request_id) session.active_request = null;
   session.updated_at = now;
   persistInteractiveSession(session);
+}
+function refreshObserverEvents(session) {
+  if (!session.observer_event_dir) return;
+  const records = readObserverRecords(
+    session.observer_event_dir,
+    session.observer_generation,
+    session.observer_seq || 0
+  );
+  session.observer_record_pending = records.pending;
+  if (records.skipped_sequences.length) {
+    session.observer_skipped_sequences = [
+      ...session.observer_skipped_sequences || [],
+      ...records.skipped_sequences
+    ].slice(-64);
+    session.observer_uncertain = true;
+  }
+  for (const { event, file } of records) {
+    if (event.kind === "ready") {
+      session.observer_ready = true;
+      session.observer_version = event.version;
+      session.claude_session_id = event.session_id;
+      session.resolved.claude_session_id = event.session_id;
+    } else if (session.observer_ready && event.session_id === session.claude_session_id && !event.agent_id) {
+      if (event.kind === "turn.start" && typeof event.turn_id === "string") {
+        session.native_active_turn_id = event.turn_id;
+        session.native_active_since = event.at;
+        session.observer_uncertain = false;
+      } else if (event.kind === "turn.complete" && typeof event.turn_id === "string") {
+        if (session.native_active_turn_id === event.turn_id) {
+          session.native_active_turn_id = null;
+          session.native_active_since = null;
+        }
+        session.latest_native_outcome = {
+          turn_id: event.turn_id,
+          at: event.at,
+          reason: event.reason,
+          answer: typeof event.answer === "string" ? event.answer.slice(0, 64e3) : null,
+          background_tasks_pending: event.stop?.background_tasks_pending ?? null,
+          session_crons_pending: event.stop?.session_crons_pending ?? null
+        };
+        if (!session.native_active_turn_id) session.observer_uncertain = false;
+      }
+      const request = session.active_request;
+      if (request && event.request_token === request.hook_correlation_token && !event.agent_id) {
+        if (event.kind === "turn.start") {
+          request.native_turn_id = event.turn_id;
+          request.submitted_at ||= event.at;
+          request.status = "working";
+        } else if (event.kind === "turn.complete" && typeof event.turn_id === "string" && (!request.native_turn_id || request.native_turn_id === event.turn_id)) {
+          request.native_turn_id = event.turn_id;
+          request.marker_seen ||= interactiveTextSince(session, request.start_seq).includes(request.completion_marker);
+          if (typeof event.answer !== "string" || typeof event.is_aborted !== "boolean") {
+            session.observer_seq = event.seq;
+            fs3.rmSync(file, { force: true });
+            continue;
+          }
+          const stop = event.stop || request.stop_candidate;
+          request.background_tasks_pending = event.stop?.background_tasks_pending ?? request.stop_candidate?.background_tasks_pending ?? null;
+          request.session_crons_pending = event.stop?.session_crons_pending ?? request.stop_candidate?.session_crons_pending ?? null;
+          request.stop_block_overridden = typeof event.stop?.blocked === "boolean" ? event.stop.blocked : null;
+          request.observed = {
+            model: typeof event.observed?.model === "string" ? event.observed.model : null,
+            effort: typeof event.observed?.effort === "string" ? event.observed.effort : null,
+            last_api_model: event.last_api_model || null,
+            source: "claude_code_mod",
+            note: "turn.step observation; downstream mods or model limits may change effort",
+            effort_matches_request: session.resolved.requested_effort && event.observed?.effort != null ? session.resolved.requested_effort === event.observed.effort : null
+          };
+          session.resolved.observed = request.observed;
+          const completion = {
+            ...event,
+            hook_event_name: "turn.complete",
+            last_assistant_message: event.answer || null,
+            last_assistant_message_truncated: Boolean(event.answer_truncated)
+          };
+          request.completion_confirmation = "native_turn_complete";
+          if (event.is_aborted || event.reason === "aborted" || stop?.prevent_continuation) {
+            finalizeRequest(session, request, {
+              status: "interrupted",
+              terminalState: "native_turn_aborted",
+              event: completion
+            });
+          } else if (["error", "refusal"].includes(event.reason)) {
+            finalizeRequest(session, request, {
+              status: "failed",
+              terminalState: `native_turn_${event.reason}`,
+              event: completion
+            });
+          } else if (event.reason === "answer") {
+            finalizeRequest(session, request, {
+              status: "completed",
+              terminalState: "completed_with_native_event",
+              event: completion
+            });
+          } else {
+            request.provisional_result_text = event.answer || null;
+            request.attention_required = {
+              reason: "completion_unconfirmed",
+              instruction: "An unknown native completion reason was observed. Read the session or stop it; do not resend the request."
+            };
+          }
+        }
+      }
+    }
+    session.observer_seq = event.seq;
+    fs3.rmSync(file, { force: true });
+    persistInteractiveSession(session);
+  }
 }
 function refreshHookEvents(session) {
   if (!session.hook_event_path) return [];
@@ -22516,14 +22743,14 @@ function refreshHookEvents(session) {
     session.active_request.prompt_event_offset = session.active_request.submitted_at ? 0 : null;
   }
   if (size <= startOffset) return [];
-  const fd = fs2.openSync(session.hook_event_path, "r");
+  const fd = fs3.openSync(session.hook_event_path, "r");
   let buffer;
   try {
     buffer = Buffer.alloc(Math.min(size - startOffset, MAX_HOOK_READ_BYTES));
-    const bytesRead = fs2.readSync(fd, buffer, 0, buffer.length, startOffset);
+    const bytesRead = fs3.readSync(fd, buffer, 0, buffer.length, startOffset);
     buffer = buffer.subarray(0, bytesRead);
   } finally {
-    fs2.closeSync(fd);
+    fs3.closeSync(fd);
   }
   const lastNewline = buffer.lastIndexOf(10);
   if (lastNewline === -1) return [];
@@ -22570,7 +22797,7 @@ function refreshHookEvents(session) {
         request.prompt_event_offset = event.event_offset_end;
       } else if (event.hook_event_name === "Notification" && eventAfterPrompt) {
         request.last_notification = event;
-        if (event.notification_type === "permission_prompt") {
+        if (["permission_prompt", "elicitation_dialog", "elicitation_url_dialog"].includes(event.notification_type)) {
           const attentionKey = permissionAttentionKey(event);
           const duplicateAttention = request.permission_attention && permissionAttentionKey(request.permission_attention) === attentionKey;
           const alreadyCleared = request.permission_attention_cleared_key === attentionKey;
@@ -22579,12 +22806,12 @@ function refreshHookEvents(session) {
           }
         }
       } else if (eventAfterPrompt && event.hook_event_name === "Stop") {
-        finalizeRequest(session, request, {
-          status: "completed",
-          terminalState: "completed_with_stop_hook",
-          event
-        });
+        request.stop_candidate = event;
+        request.terminal_state = "awaiting_native_completion";
+        persistInteractiveSession(session);
       } else if (eventAfterPrompt && event.hook_event_name === "StopFailure") {
+        session.native_active_turn_id = null;
+        session.native_active_since = null;
         finalizeRequest(session, request, {
           status: "failed",
           terminalState: `stop_failure:${event.error || "unknown"}`,
@@ -22602,6 +22829,7 @@ function refreshHookEventsFromMonitor(session) {
   if (!session?.hook_event_path || !LIVE_SESSION_STATUSES.has(session.status)) return [];
   try {
     const events = refreshHookEvents(session);
+    refreshObserverEvents(session);
     if (session.hook_monitor_error) {
       session.hook_monitor_error = null;
       persistInteractiveSession(session);
@@ -22630,7 +22858,7 @@ function startHookMonitor(session) {
   if (!session?.hook_event_path) return;
   stopHookMonitor(session);
   try {
-    session.hook_watcher = fs2.watch(
+    session.hook_watcher = fs3.watch(
       session.hook_event_path,
       { persistent: false },
       () => refreshHookEventsFromMonitor(session)
@@ -22746,6 +22974,11 @@ function compactInteractiveSession(session, { includeOutput = false, strip = tru
     exit_code: session.exit_code,
     signal: session.signal,
     error: session.error,
+    native_active_turn_id: session.native_active_turn_id || null,
+    native_active_since: session.native_active_since || null,
+    latest_native_outcome: session.latest_native_outcome || null,
+    observer_record_pending: Boolean(session.observer_record_pending),
+    observer_skipped_sequences: session.observer_skipped_sequences || [],
     ready_at: session.ready_at,
     ready_wait: session.ready_wait,
     hooks_active: session.hooks_active,
@@ -22811,12 +23044,21 @@ function persistedSessionView(record2, { includeOutput = false, maxChars = MAX_T
   view.owner_instance_id = record2.owner_instance_id;
   return view;
 }
+function assertNativeInputAvailable(session) {
+  refreshObserverEvents(session);
+  if (session.native_active_turn_id || session.observer_record_pending || session.observer_uncertain) {
+    throw new Error(
+      "Claude's native main turn is active or its observer state is incomplete. Use claude_interactive_read / claude_interactive_wait, or claude_interactive_stop; do not resend input while it is active."
+    );
+  }
+}
 function assertInteractiveInputAvailable(session) {
   if (requestIsPending(session.active_request)) {
     throw new Error(
       "Interactive Claude session " + session.interactive_id + " has pending request " + session.active_request.request_id + ". Use claude_interactive_wait_request before sending another input."
     );
   }
+  assertNativeInputAvailable(session);
 }
 function acquireInteractiveInputLease(session, operation) {
   if (session.input_busy) {
@@ -22837,6 +23079,7 @@ async function writeInteractiveInput(session, text, { submit = true, paste = tru
     throw new Error(`Interactive Claude session ${session.interactive_id} is not running.`);
   }
   const body = String(text || "");
+  assertNativeInputAvailable(session);
   if (paste) {
     await writeProcessStdin(session, `\x1B[200~${body}\x1B[201~`);
     if (submit) await delay2(submitDelayForPaste(body));
@@ -22846,7 +23089,11 @@ async function writeInteractiveInput(session, text, { submit = true, paste = tru
   if (submit) {
     const enterCount = paste ? SUBMIT_ENTER_COUNT : 1;
     for (let index = 0; index < enterCount; index += 1) {
-      if (index > 0) await delay2(SUBMIT_ENTER_GAP_MS);
+      if (index > 0) {
+        await delay2(SUBMIT_ENTER_GAP_MS);
+        refreshObserverEvents(session);
+        if (session.native_active_turn_id || session.observer_record_pending || session.observer_uncertain) break;
+      }
       await writeProcessStdin(session, "\r");
     }
   }
@@ -22891,6 +23138,13 @@ async function confirmInteractiveSubmit(session, sinceSeq, { extraPattern = null
     if (!/Pasted text|Past ext|paste again/i.test(text)) {
       return { reason: wait.reason, attempts };
     }
+    refreshObserverEvents(session);
+    if (hookCorrelationToken && session.active_request?.hook_correlation_token === hookCorrelationToken && session.active_request.submitted_at) {
+      return { reason: "submitted", transport: "native_turn_start", attempts };
+    }
+    if (session.native_active_turn_id || session.observer_record_pending || session.observer_uncertain) {
+      return { reason: "native_state_unavailable", attempts };
+    }
     await writeProcessStdin(session, "\r");
   }
   return { reason: "unconfirmed", attempts };
@@ -22899,9 +23153,10 @@ async function ensureInteractiveReady(session) {
   if (session.ready_at) {
     return { reason: "already_ready", waited_ms: 0 };
   }
+  let sinceSeq = 0;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const wait = await waitForInteractive(session, {
-      sinceSeq: 0,
+      sinceSeq,
       idleMs: STARTUP_READY_IDLE_MS,
       timeoutMs: STARTUP_READY_TIMEOUT_MS,
       strip: true,
@@ -22914,7 +23169,19 @@ async function ensureInteractiveReady(session) {
         `Interactive Claude session ${session.interactive_id} did not become ready before first input: ${wait.reason}`
       );
     }
-    if (!startupMcpSelectorVisible(session)) {
+    assertNoStartupDialog(session, sinceSeq);
+    if (!startupMcpSelectorVisible(session, sinceSeq)) {
+      const deadline = Date.now() + STARTUP_READY_TIMEOUT_MS;
+      while (!session.observer_ready && Date.now() < deadline && session.status === "running") {
+        refreshObserverEvents(session);
+        assertNoStartupDialog(session, sinceSeq);
+        if (!session.observer_ready) await delay2(50);
+      }
+      if (!session.observer_ready) {
+        throw new Error(
+          `Claude Code's lifecycle observer did not load. No request was sent. Call claude_interactive_stop for ${session.interactive_id}, then check CLI version, Mod policy and startup output; Claude Code 2.1.322 or newer is required.`
+        );
+      }
       session.ready_at = (/* @__PURE__ */ new Date()).toISOString();
       return wait;
     }
@@ -22923,6 +23190,7 @@ async function ensureInteractiveReady(session) {
         `Interactive Claude session ${session.interactive_id} is waiting at the MCP selection screen. The startup selector was not dismissed; inspect the session before sending the review request.`
       );
     }
+    sinceSeq = session.next_seq - 1;
     await writeProcessStdin(session, session.resolved.mcp_preset === "none" ? "\x1B" : "\r");
     await delay2(150);
   }
@@ -22958,7 +23226,7 @@ async function waitForInteractive(session, {
   try {
     try {
       if (session.hook_event_path) {
-        hookWatcher = fs2.watch(session.hook_event_path, { persistent: false }, () => waiter.notify?.());
+        hookWatcher = fs3.watch(session.hook_event_path, { persistent: false }, () => waiter.notify?.());
         hookWatcher.on("error", () => {
           hookWatcher?.close();
           hookWatcher = null;
@@ -22970,6 +23238,17 @@ async function waitForInteractive(session, {
       const text = waiter.buffer;
       if (untilHookEvents?.length) {
         refreshHookEvents(session);
+        refreshObserverEvents(session);
+        if (hookCorrelationToken) {
+          const acknowledged = session.active_request || session.last_request;
+          if (acknowledged?.hook_correlation_token === hookCorrelationToken && acknowledged.submitted_at) {
+            return {
+              reason: "hook",
+              matched_hook: { hook_event_name: "UserPromptSubmit", source: "native_turn_start" },
+              waited_ms: Date.now() - started
+            };
+          }
+        }
         if (hookRequestId && session.last_request?.request_id === hookRequestId && !requestIsPending(session.last_request) && session.last_request.completion_event) {
           return {
             reason: "hook",
@@ -22978,10 +23257,10 @@ async function waitForInteractive(session, {
           };
         }
         const correlatedRequest = hookRequestId && session.active_request?.request_id === hookRequestId ? session.active_request : null;
-        if (wakeOnPermissionAttention && hookRequestId && session.active_request?.request_id === hookRequestId && session.active_request.permission_attention) {
+        if (wakeOnPermissionAttention && hookRequestId && session.active_request?.request_id === hookRequestId && (session.active_request.permission_attention || session.active_request.attention_required)) {
           return {
             reason: "hook",
-            matched_hook: session.active_request.permission_attention,
+            matched_hook: session.active_request.permission_attention || session.active_request.attention_required,
             waited_ms: Date.now() - started
           };
         }
@@ -23068,7 +23347,7 @@ function beginInteractiveRequest(session, completionMarker) {
     status: "submitting",
     done: false,
     terminal_state: "submitting",
-    completion_transport: session.hooks_active ? "claude_code_hooks_with_marker_fallback" : "completion_marker",
+    completion_transport: "claude_code_mod",
     completion_marker: completionMarker,
     marker_seen: false,
     start_seq: session.next_seq - 1,
@@ -23095,14 +23374,11 @@ async function waitForRequestCompletion(session, request, { idleMs, timeoutMs, s
   if (!requestIsPending(request)) {
     const wait2 = request.completion_event ? { reason: "hook", matched_hook: request.completion_event, waited_ms: 0 } : { reason: "already_terminal", waited_ms: 0 };
     request.last_wait = wait2;
-    request.end_log_offset ||= fileSizeBytes(session.log_path);
-    persistInteractiveSession(session);
     return wait2;
   }
-  let wait = await waitForInteractive(session, {
+  const wait = await waitForInteractive(session, {
     sinceSeq: request.start_seq,
-    untilTexts: [request.completion_marker],
-    untilHookEvents: ["Stop", "StopFailure"],
+    untilHookEvents: ["StopFailure"],
     wakeOnPermissionAttention: true,
     hookSinceOffset: request.hook_start_offset,
     hookRequestId: request.request_id,
@@ -23110,46 +23386,13 @@ async function waitForRequestCompletion(session, request, { idleMs, timeoutMs, s
     timeoutMs,
     strip
   });
-  if (!requestIsPending(request)) {
-    request.last_wait = wait;
-    request.end_log_offset = fileSizeBytes(session.log_path);
-    persistInteractiveSession(session);
-    return wait;
-  }
-  if (wait.reason === "pattern") {
-    request.marker_seen = true;
-    if (session.hooks_active) {
-      const hookGrace = await waitForInteractive(session, {
-        sinceSeq: request.start_seq,
-        untilHookEvents: ["Stop", "StopFailure"],
-        hookSinceOffset: request.hook_start_offset,
-        hookRequestId: request.request_id,
-        timeoutMs: HOOK_COMPLETION_GRACE_MS,
-        strip
-      });
-      if (!requestIsPending(request)) {
-        wait = { ...hookGrace, marker_seen_before_hook: true };
-        request.last_wait = wait;
-        request.end_log_offset = fileSizeBytes(session.log_path);
-        persistInteractiveSession(session);
-        return wait;
-      }
-      wait = { ...wait, hook_grace: hookGrace };
+  if (requestIsPending(request)) {
+    if (wait.reason === "exited") {
+      finalizeRequest(session, request, { status: "interrupted", terminalState: "process_exited" });
+    } else {
+      request.status = request.submitted_at ? "working" : "waiting";
+      request.terminal_state = wait.reason === "idle" ? "idle_without_completion" : wait.reason === "idle_no_output" ? "idle_without_output" : wait.reason;
     }
-    finalizeRequest(session, request, {
-      status: "completed",
-      terminalState: "completed_with_marker",
-      markerSeen: true
-    });
-  } else if (wait.reason === "exited") {
-    finalizeRequest(session, request, {
-      status: "interrupted",
-      terminalState: "process_exited"
-    });
-  } else {
-    request.status = request.submitted_at ? "working" : "waiting";
-    request.terminal_state = wait.reason === "idle" ? "idle_without_completion" : wait.reason === "idle_no_output" ? "idle_without_output" : wait.reason;
-    persistInteractiveSession(session);
   }
   request.last_wait = wait;
   request.end_log_offset = fileSizeBytes(session.log_path);
@@ -23189,6 +23432,7 @@ async function startInteractiveClaude(rawInput) {
   if (!claudeInfo.available) throw new Error(`Claude Code is unavailable: ${claudeInfo.error || "unknown error"}`);
   const requiredCapabilities = [
     "settings",
+    "plugin_dir",
     "setting_sources",
     "append_system_prompt_file",
     "allowed_tools",
@@ -23204,10 +23448,12 @@ async function startInteractiveClaude(rawInput) {
       );
     }
   }
-  const claudeAuth = await claudeAuthPreflight.detectClaudeAuth(input.cwd);
+  const claudeAuth = await claudeAuthPreflight.detectClaudeAuth(input.cwd, {
+    settingSources: settingSourcesFor(input)
+  });
   if (!claudeAuth.ready) throw new Error(claudeAuthPreflight.formatPreflightError(claudeAuth));
   const interactiveId = uniqueInteractiveId();
-  const logPath = path2.join(INTERACTIVE_LOG_DIR, `${interactiveId}.log`);
+  const logPath = path3.join(INTERACTIVE_LOG_DIR, `${interactiveId}.log`);
   const hookRuntime = createHookRuntime(interactiveId, input.role || "reviewer");
   hookRuntime.useSettings = true;
   const { args, resolved } = buildInteractiveArgs(input, hookRuntime);
@@ -23233,6 +23479,8 @@ async function startInteractiveClaude(rawInput) {
     instruction_context_path: hookRuntime.instructionContextPath
   });
   const env = buildClaudeEnvironment();
+  env.CODEX_CLAUDE_SUBAGENT_OBSERVER_DIR = hookRuntime.observerEventDir;
+  env.CODEX_CLAUDE_SUBAGENT_OBSERVER_GENERATION = hookRuntime.observerGeneration;
   const cols = input.cols || 120;
   const rows = input.rows || 40;
   const ptyCommand = buildPtyBridgeCommand("claude", args, { cols, rows });
@@ -23274,6 +23522,10 @@ async function startInteractiveClaude(rawInput) {
     ready_at: null,
     ready_wait: null,
     hook_event_path: hookRuntime?.eventPath || null,
+    observer_event_dir: hookRuntime.observerEventDir,
+    observer_generation: hookRuntime.observerGeneration,
+    observer_ready: false,
+    observer_seq: 0,
     hook_file_generation: hookRuntime?.hookFileGeneration || null,
     hook_settings_path: hookRuntime?.settingsPath || null,
     instruction_context_path: hookRuntime?.instructionContextPath || null,
@@ -23318,6 +23570,8 @@ async function startInteractiveClaude(rawInput) {
     stopHookMonitor(session);
     const now = (/* @__PURE__ */ new Date()).toISOString();
     session.status = "failed";
+    session.native_active_turn_id = null;
+    session.native_active_since = null;
     session.error = error2.message;
     if (requestIsPending(session.active_request)) {
       finalizeRequest(session, session.active_request, {
@@ -23335,6 +23589,8 @@ async function startInteractiveClaude(rawInput) {
     stopHookMonitor(session);
     const now = (/* @__PURE__ */ new Date()).toISOString();
     session.status = session.status === "failed" ? "failed" : "exited";
+    session.native_active_turn_id = null;
+    session.native_active_since = null;
     session.exit_code = code;
     session.signal = signal;
     if (requestIsPending(session.active_request)) {
@@ -23354,10 +23610,13 @@ async function startInteractiveClaude(rawInput) {
 }
 var roleEnum = _enum(["explorer", "reviewer", "security_reviewer", "critic", "architect", "implementer"]);
 var effortSchema = string2().min(1);
-var permissionModeEnum = _enum(["dontAsk", "plan"]);
+var permissionModeEnum = _enum(["bypassPermissions"]);
 var mcpPresetEnum = _enum(["auto", "none", "serena", "context7", "serena_context7"]);
 var interactiveSessionInput = {
   cwd: string2().describe("Absolute path to the target project directory."),
+  subagent_mode: _enum(["disabled", "auto"]).default("disabled").describe(
+    "disabled runs one Claude agent (default). Explicit auto permits native Agent delegation for implementer; distribution is Claude Code's decision. Read-only auto is currently rejected because custom-agent tool inheritance is not verified."
+  ),
   role: roleEnum.default("reviewer").describe(
     "Role contract: explorer/reviewer/security_reviewer/critic/architect are read-only; implementer edits the target project directly through cwd. Model and effort defaults remain with Claude Code unless explicitly provided."
   ),
@@ -23376,7 +23635,9 @@ var interactiveSessionInput = {
   mcp_preset: mcpPresetEnum.optional().describe(
     "MCP behavior. auto uses normal project discovery; none uses a strict empty config. Named legacy presets also use project discovery."
   ),
-  permission_mode: permissionModeEnum.optional().describe("Claude Code permission mode."),
+  permission_mode: permissionModeEnum.optional().describe(
+    "Claude Code permission mode. All roles use bypassPermissions; interaction-required tools and policy can still need attention."
+  ),
   name: string2().optional().describe("Human-readable Claude session name."),
   claude_session_id: string2().uuid().optional().describe(
     "Claude Code session UUID for a new session. If omitted, Codex\u2013Claude Subagent generates one and passes --session-id."
@@ -23438,7 +23699,7 @@ server.registerTool(
   "claude_interactive_request",
   {
     title: "Request Interactive Claude Code",
-    description: "Submit one correlated Claude Code turn and wait for its Stop/StopFailure hook, with a completion-marker fallback. Idle and timeout returns remain resumable by request id.",
+    description: "Submit one correlated Claude Code main turn and wait for native turn.complete or StopFailure. done means main-turn completion, not acceptance of all work; inspect work_pending/count_unknown. Markers and silence never prove completion. Idle and timeout remain resumable by request id.",
     inputSchema: {
       cwd: string2().describe("Absolute path to the same target project directory."),
       interactive_id: string2().min(1).describe("Interactive session id from claude_interactive_start."),
@@ -23554,16 +23815,21 @@ server.registerTool(
     if (retry_submit && requestIsPending(request) && !request.submitted_at) {
       const releaseInput = acquireInteractiveInputLease(session, "claude_interactive_wait_request.retry_submit");
       try {
-        const sinceSeq = session.next_seq - 1;
-        await writeProcessStdin(session, "\r");
-        retrySubmit = await confirmInteractiveSubmit(session, sinceSeq, {
-          extraPattern: request.completion_marker,
-          hookSinceOffset: request.hook_start_offset,
-          hookCorrelationToken: request.hook_correlation_token
-        });
-        if (retrySubmit.reason === "submitted" && requestIsPending(request)) {
-          request.status = "working";
-          request.submitted_at ||= (/* @__PURE__ */ new Date()).toISOString();
+        refreshHookEvents(session);
+        refreshObserverEvents(session);
+        if (requestIsPending(request) && !request.submitted_at) {
+          assertNativeInputAvailable(session);
+          const sinceSeq = session.next_seq - 1;
+          await writeProcessStdin(session, "\r");
+          retrySubmit = await confirmInteractiveSubmit(session, sinceSeq, {
+            extraPattern: request.completion_marker,
+            hookSinceOffset: request.hook_start_offset,
+            hookCorrelationToken: request.hook_correlation_token
+          });
+          if (retrySubmit.reason === "submitted" && requestIsPending(request)) {
+            request.status = "working";
+            request.submitted_at ||= (/* @__PURE__ */ new Date()).toISOString();
+          }
         }
       } finally {
         releaseInput();
@@ -23641,6 +23907,7 @@ server.registerTool(
     const session = await requireInspectableSession(interactive_id, cwd);
     if (interactiveSessions.has(interactive_id)) {
       refreshHookEvents(session);
+      refreshObserverEvents(session);
       return textResult(
         compactInteractiveSession(session, {
           includeOutput: true,
@@ -23807,7 +24074,10 @@ server.registerTool(
         read_only_roles_mutate_files: false,
         implementer_requires_claude_worktree: false,
         implementer_filesystem_isolation: "none",
-        nested_subagents: false,
+        nested_subagents: "explicit_only",
+        default_subagent_mode: "disabled",
+        read_only_subagents: "unsupported_until_tool_inheritance_verified",
+        completion: "native_mod_turn_complete",
         request_boundary: "injected_by_role",
         forwards_allowlisted_interactive_claude_args: true,
         forbidden_claude_arg_flags: [...FORBIDDEN_CLAUDE_ARG_FLAGS],
