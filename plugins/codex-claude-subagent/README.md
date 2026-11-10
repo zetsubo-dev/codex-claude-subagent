@@ -86,12 +86,30 @@ Ask Codex, for example, "Have Claude review this with Opus and high effort" or
 "Have Claude implement this using Fable and xhigh effort; allow its subagents."
 Codex maps these instructions to `role`, `model`, `effort`, and
 `subagent_mode` in the start tool. The plugin itself does not parse natural language.
-Selecting a plugin or skill explicitly also makes the intended route clear.
+Selecting this plugin or skill explicitly also makes the intended route clear.
+Naming a Claude model for the task counts too: `FableとOpusでレビューして`
+requests two separate reviewer sessions with `model: "fable"` and
+`model: "opus"`. Unspecified effort stays omitted, and Claude runs alone in
+each session. A single model is not silently substituted for the requested pair.
 
 The MCP server connecting and Codex choosing a tool are separate steps.
-An ordinary review request does not automatically delegate to Claude. The
-calling skill discovers deferred tools, checks `codex_claude_subagent_info`,
-then starts a session when Claude involvement is requested.
+An ordinary review or second-opinion request stays with Codex. Only after
+Claude involvement is requested does the calling skill discover deferred tools,
+check `codex_claude_subagent_info`, and start a session. Discussing the plugin
+or quoting an invocation example does not request a session; an explicit
+instruction not to use Claude takes precedence. The adapter receives tool
+calls, not the user's original message, so this routing boundary is guidance
+for the calling agent, not a server-side natural-language authorization check.
+
+Review-only requests return findings without automatically applying fixes or
+starting a fix/re-review loop. Those steps require the user's instruction.
+
+In a mixed-model harness, Codex owns orchestration: for example, it can ask
+Fable to judge a design and Opus to propose one through Claude `architect`
+sessions, then delegate implementation to a Codex Terra/xhigh subagent.
+Terra is not a Claude model and is not sent to this plugin. The host must
+support the requested Codex model and reasoning effort; the plugin does not
+automatically create that workflow or assign decision authority.
 
 `role` defaults to `reviewer`; `subagent_mode` defaults to `disabled` for every
 role. Use `subagent_mode: "auto"` explicitly with `implementer` to expose the
@@ -118,17 +136,19 @@ Code. `effort` is also passed through unchanged, so new Claude Code values do
 not require a plugin release. If Claude Code rejects a value, start the session
 again with a value supported by that installation.
 
-When the caller omits `model` or `effort`, the plugin omits that CLI option and
-Claude Code uses its own default. The default therefore comes from the installed
-Claude Code, the user's account, and its normal settings sources. There is no
-automatic model fallback injected by the plugin.
+New `reviewer`, `security_reviewer`, and `critic` sessions default to `opus`
+when no model is named. Other roles leave the model to Claude Code. Unspecified
+effort always stays with Claude Code, using its normal account and settings
+sources. On exact-session resume, an omitted model preserves the conversation's
+model instead of forcing Opus. Explicit model choices take precedence, and the
+plugin does not inject automatic model fallback.
 
 The response's `requested_model` and `requested_effort` are requested values,
 not proof of effective selection. `observed` records what the observer saw;
 `last_api_model` means the final API response's model, not every step's model.
 An inherited `CLAUDE_CODE_EFFORT_LEVEL` outranks `--effort`; a conflicting
 explicit request is rejected before launch instead of silently using another
-level. Omitted values preserve normal Claude Code settings and environment.
+level. Omitted effort preserves normal Claude Code settings and environment.
 Recent models use per-model effort settings; an older user-level
 `effortLevel: "high"` does not necessarily apply to a newer model.
 
@@ -203,8 +223,17 @@ the session and resume its exact Claude UUID after resolving the cause.
 - Codex desktop app or Codex CLI with plugin support
 - Node.js 20 or newer
 - Python 3
+- Git and access to GitHub
 - Claude Code 2.1.322 or newer, with local observer Mods permitted
 - An active `claude.ai` subscription login in Claude Code
+
+The observer uses the [Claude Code Mods API](https://github.com/anthropics/claude-code/blob/main/mods/README.md),
+which Anthropic describes as early access and subject to change without notice.
+From a repository checkout with development dependencies installed, recheck
+compatibility with `pnpm run smoke:live -- /absolute/project/path --background`
+after updating Claude Code; this command is not included in the distribution ZIP.
+If the observer cannot load, the plugin reports a
+failure rather than inferring successful completion from silence or a Stop hook.
 
 Linux and Windows are not currently supported because the local PTY bridge is
 macOS-oriented.
@@ -221,12 +250,55 @@ For the Codex desktop app:
 If macOS blocks the installer the first time, right-click `Install.command`,
 choose **Open**, and confirm.
 
+`Install.command` requires internet access and a plugin-enabled Codex CLI
+(PATH or the installed desktop app). Before changing the installed plugin, it
+fetches the official Git marketplace in a private staging home and compares the
+complete version and distributed plugin files with the ZIP. A mismatch stops
+installation; download the latest ZIP rather than installing a different version
+silently. The installed files are checked again before success is reported.
+
+The installer updates the same `codex-claude-subagent@codex-claude-subagent` ID.
+It leaves an already verified installation untouched. Otherwise, it refuses to
+replace a cache used by a running process; close the app and CLI chats before
+retrying. It keeps a private recovery backup and restores the previous cache if
+installation or its final verification fails, along with the previous Git
+marketplace snapshot when available. Backups are private directories named
+`codex-claude-subagent-install-backup-*` inside `CODEX_HOME` (normally `~/.codex`);
+remove a backup only after verifying the update and no longer needing recovery.
+It never deletes the plugin's
+session state or Claude Code's native conversation history. Existing chats keep
+their loaded server; use a new chat or restart the app to load the new version.
+
+An older ZIP may have registered a local source with the same marketplace name.
+On a source-conflict error, close the app and CLI chats, then run:
+
+```sh
+codex plugin marketplace remove codex-claude-subagent
+```
+
+Run `Install.command` again. The remove command unregisters that marketplace;
+it leaves its original extracted folder, plugin cache, and plugin enabled entry
+intact. The installer then adds the official Git source and updates the same
+plugin ID. If `codex` is not on PATH, use the CLI executable printed by the
+installer. The installer itself never removes a conflicting source.
+
 For Codex CLI, register the GitHub marketplace:
 
 ```sh
 codex plugin marketplace add zetsubo-dev/codex-claude-subagent
 codex plugin add codex-claude-subagent@codex-claude-subagent
 ```
+
+For an existing Git installation, close running Codex sessions first:
+
+```sh
+codex plugin marketplace upgrade codex-claude-subagent
+codex plugin add codex-claude-subagent@codex-claude-subagent
+```
+
+Prefer `Install.command` for verified updates and busy-cache protection; direct
+CLI installation can prune old cache versions. Neither route hot-swaps servers
+already loaded in existing chats.
 
 Start a new Codex conversation after installation so the plugin's MCP tools and
 skill are loaded.
@@ -248,6 +320,22 @@ Use `claude_interactive_request` for normal agent-to-agent work because it
 returns request-level completion state. If it returns on idle or timeout, use
 the returned request ID with `claude_interactive_wait_request`; do not resend
 the original request.
+
+## Saved session retention
+
+Stopping a session keeps it registered for exact-UUID resume; it does not
+immediately archive the conversation. Cleanup keeps live sessions and prunes
+stopped registrations using these defaults: 30 days since the record's last
+update, a 200-record registry limit (including live sessions), and a 512 MiB
+budget for stopped sessions' tracked terminal logs, hook events, settings, and
+context files. Live sessions are
+never evicted to meet these limits.
+
+The limits can be changed with `CODEX_CLAUDE_SUBAGENT_MAX_SAVED_SESSION_AGE_DAYS`,
+`CODEX_CLAUDE_SUBAGENT_MAX_SAVED_SESSIONS`, and
+`CODEX_CLAUDE_SUBAGENT_MAX_SAVED_SESSION_BYTES`. Cleanup removes the plugin's
+registration and owned session artifacts, not Claude Code's native conversation
+history. An evicted UUID cannot be resumed through this plugin's registry.
 
 ## MCP discovery
 

@@ -1,6 +1,6 @@
 ---
 name: codex-claude-subagent
-description: Use when the user asks Codex to involve Claude as a subagent, Claude Code, Claude reviewers, second opinions, or interactive Claude Code sessions from Codex. Provides guidance for the local codex_claude_subagent MCP tools.
+description: Use when the user explicitly asks to delegate work to Claude or Claude Code, requests a named Claude model such as Fable or Opus, or selects this plugin. Do not use for a generic review, second opinion, implementation, or discussion of Claude without a delegation request. Provides guidance for the codex_claude_subagent MCP tools.
 ---
 
 # Codex–Claude Subagent
@@ -8,6 +8,39 @@ description: Use when the user asks Codex to involve Claude as a subagent, Claud
 Use the `codex_claude_subagent` MCP tools to start and steer an interactive Claude Code
 session from Codex. This plugin is interactive-only. Do not look for or use
 `claude -p`, background-agent, tmux, or agmsg tools in this plugin.
+
+## Invocation Boundary
+
+Decide whether the user is asking to involve Claude before discovering tools,
+checking authentication, or starting a session. Plain review, security review,
+second-opinion, and implementation requests stay with Codex unless the user
+requests Claude or a named Claude model, or explicitly selects this plugin.
+Task complexity and a previous task's Claude session do not imply delegation.
+Discussing this plugin, quoting example requests, or asking whether its trigger
+works is not a request to start Claude. Honor an explicit instruction not to
+use Claude, including when a model name appears elsewhere in the request.
+
+| User request | Action |
+| --- | --- |
+| `Claudeでレビューして` | Start one `reviewer` session with `model: "opus"`; omit unspecified effort. |
+| `FableとOpusでレビューして` | Start two separate `reviewer` sessions, one with `model: "fable"`, one with `model: "opus"`; omit unspecified effort. |
+| `レビューして` / `review this` / `セカンドオピニオンがほしい` | Review in Codex; do not call this plugin's MCP tools. |
+| `「Claudeでレビューして」で起動する？` | Explain the behavior; do not start a session. |
+| `Claudeは使わずレビューして` | Review in Codex; do not call this plugin's MCP tools. |
+
+For several requested models, create one session per model rather than
+silently choosing one, switching a single conversation between models, or
+having Claude spawn the other reviewer. Give each the same task context and
+keep their initial reviews separate. Keep `subagent_mode: "disabled"` unless
+the user separately authorizes supported native delegation. Do not add other
+models or silently replace one that is unavailable.
+
+For a mixed-model harness, this plugin handles only the requested Claude work.
+For example, Fable can judge a design and Opus can propose it using an
+`architect` session with the named model and task-specific instructions.
+Terra/xhigh implementation belongs to the host's Codex subagent tools, not
+this plugin's `model` field. The host owns sequencing, handoffs, and adoption
+of decisions; do not infer that whole workflow from a plain review request.
 
 ## Tool Discovery
 
@@ -103,17 +136,21 @@ as proof that Codex–Claude Subagent initialized.
   `submitted`, inspect `output_tail` because Claude Code may still be in a paste
   preview or prompt state.
 
-## Review Loop
+## Review Scope
 
-Use this loop for Claude review from Codex:
+For a Claude review request:
 
 1. `claude_interactive_start` with the project `cwd`.
 2. `claude_interactive_request` with the review handoff.
-3. Read the returned output and apply fixes in Codex.
-4. `claude_interactive_request` again in the same `interactive_id` with the
-   current diff, test results, and a re-review request.
-5. Repeat until Claude has no blocking findings.
-6. `claude_interactive_stop`.
+3. Read and evaluate the findings, then report the review to the user.
+4. `claude_interactive_stop` when the requested review is complete.
+
+A review-only request does not authorize fixes, a fix/re-review loop, or an
+additional reviewer. If the user requests fixes and iterative review, apply
+only the authorized changes in Codex and send the resulting diff and test
+results back to the same Claude session for re-review. A follow-up to the same
+Claude review may continue that task; it is not blanket permission to involve
+Claude in later unrelated tasks.
 
 A successful start includes `resolved.auth`. Confirm its `billing_mode` is
 `claude_subscription` when reporting live proof that the worker is using the
@@ -238,14 +275,18 @@ context. Stop the session when no re-review will be sent.
   `Glob`, and `permission_mode: "bypassPermissions"`. Claude Code retains its normal
   edit, commit, push, and publish behavior.
 
-When `model` or `effort` is omitted, the plugin passes no corresponding CLI
-option and Claude Code selects its own default from its normal installation,
-account, and settings. The plugin does not inject a role-specific model,
-effort, or fallback. Explicit values are passed through unchanged and are
-validated by the installed Claude Code.
+New review sessions (`reviewer`, `security_reviewer`, `critic`) default to
+`model: "opus"` unless the user names another model. Other roles leave the
+model to Claude Code when unspecified. Unspecified effort always stays with
+Claude Code; there is no plugin effort or fallback default. Explicit values
+are passed through unchanged and validated by the installed Claude Code.
+On exact-session resume, an omitted model preserves the conversation's model
+rather than applying the new-review default. Keep a named-model review on its
+existing model for follow-ups unless the user requests a switch.
 
-For read-only roles, do not ask Codex–Claude Subagent to implement code changes;
-use Codex for edits, then send the resulting diff back for re-review. Use
+For read-only roles, do not ask Codex–Claude Subagent to implement code changes.
+If edits and re-review were requested, use Codex for edits, then send the
+resulting diff back for re-review. Use
 `role: "implementer"` when the caller wants Claude to make the change in the
 target project directory.
 
@@ -256,16 +297,20 @@ native subagents were explicitly requested. Pass model/effort as tool fields,
 not merely in the prompt. For "Opus, high, independent review, single agent",
 use `role: "reviewer"`, `model: "opus"`, `effort: "high"`, and
 `subagent_mode: "disabled"`. Do not silently replace named models.
-For a plain review with no Claude request, do not delegate automatically.
-The default role is `reviewer`; unspecified model and effort remain omitted.
+Fable and Opus are Claude model names: their explicit use for a review selects
+this route even when the word Claude is omitted. For a plain review with no
+Claude or named-model request, do not delegate automatically.
+The default role is `reviewer`, whose new-session default model is `opus`.
+Unspecified effort remains omitted.
 An explicit plugin/skill selection also expresses intent to use this route.
 
 The calling agent may set `model` and `effort` on every new
 `claude_interactive_start`. `model` accepts any non-empty Claude Code alias or
 full model ID and `effort` accepts any non-empty value; both are passed through
 unchanged and validated by the installed Claude Code. This lets the caller use
-new Claude model or effort values without a plugin release. When either value
-is omitted, Claude Code's own default is used.
+new Claude model or effort values without a plugin release. New reviews use
+Opus if no model was requested; other omitted models and all omitted effort
+values use Claude Code's defaults. Exact-session resume does not force Opus.
 
 Compare `resolved.requested_model` / `requested_effort` with `observed` when
 available. A request field is not an effective-setting measurement.

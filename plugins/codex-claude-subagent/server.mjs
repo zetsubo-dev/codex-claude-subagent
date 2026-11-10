@@ -180,6 +180,7 @@ const ROLE_PROFILES = {
     permissionMode: "bypassPermissions",
   },
   reviewer: {
+    defaultModel: "opus",
     mode: "read_only",
     purpose: "Review correctness, maintainability, and regressions without changing files.",
     mutatesFiles: false,
@@ -191,6 +192,7 @@ const ROLE_PROFILES = {
     permissionMode: "bypassPermissions",
   },
   security_reviewer: {
+    defaultModel: "opus",
     mode: "read_only",
     purpose: "Perform a complex security review without changing files.",
     mutatesFiles: false,
@@ -202,6 +204,7 @@ const ROLE_PROFILES = {
     permissionMode: "bypassPermissions",
   },
   critic: {
+    defaultModel: "opus",
     mode: "read_only",
     purpose: "Give an adversarial second opinion without changing files.",
     mutatesFiles: false,
@@ -684,14 +687,16 @@ function profileFor(role) {
 function roleProfilesForInfo() {
   return Object.fromEntries(
     Object.entries(ROLE_PROFILES).map(([role, profile]) => {
-      const { mutatesFiles, requiresWorktree, filesystemIsolation, ...rest } = profile;
+      const { defaultModel = null, mutatesFiles, requiresWorktree, filesystemIsolation, ...rest } = profile;
       return [
         role,
         {
           ...rest,
-          model: null,
+          model: defaultModel,
           effort: null,
-          model_effort_default_source: MODEL_EFFORT_DEFAULT_SOURCE,
+          model_default_source: defaultModel ? "plugin_role" : MODEL_EFFORT_DEFAULT_SOURCE,
+          effort_default_source: MODEL_EFFORT_DEFAULT_SOURCE,
+          model_effort_default_source: defaultModel ? "plugin_role_and_claude_code" : MODEL_EFFORT_DEFAULT_SOURCE,
           mutates_files: mutatesFiles,
           requires_worktree: requiresWorktree,
           filesystem_isolation: filesystemIsolation,
@@ -1046,7 +1051,7 @@ function buildInteractiveArgs(input, hookRuntime) {
   const resumeMode = input.resume_claude_session_id ? "resume" : "new";
   const claudeSessionId =
     resumeMode === "new" ? input.claude_session_id || crypto.randomUUID() : input.resume_claude_session_id;
-  const resolvedModel = input.model || null;
+  const resolvedModel = input.model || (resumeMode === "new" ? profile.defaultModel || null : null);
   const resolvedEffort = input.effort || null;
   const resolvedFallback = null;
   const subagentMode = input.subagent_mode || "disabled";
@@ -2516,14 +2521,14 @@ const interactiveSessionInput = {
   role: roleEnum
     .default("reviewer")
     .describe(
-      "Role contract: explorer/reviewer/security_reviewer/critic/architect are read-only; implementer edits the target project directly through cwd. Model and effort defaults remain with Claude Code unless explicitly provided.",
+      "Role contract: explorer/reviewer/security_reviewer/critic/architect are read-only; implementer edits directly through cwd. New reviewer/security_reviewer/critic sessions default to opus. Other model defaults and unspecified effort stay with Claude Code.",
     ),
   model: z
     .string()
     .min(1)
     .optional()
     .describe(
-      "Optional Claude model alias or full model ID. Passed through unchanged; when omitted, Claude Code selects the model using its own defaults.",
+      "Optional Claude model alias or full model ID. Explicit values pass through unchanged. New reviewer/security_reviewer/critic sessions default to opus; other roles use Claude Code defaults. Omit on exact-session resume to preserve the conversation's model.",
     ),
   effort: effortSchema
     .optional()
@@ -2587,7 +2592,7 @@ server.registerTool(
   {
     title: "Start Interactive Claude Code",
     description:
-      "Start an interactive Claude Code subagent. Read-only roles (explorer, reviewer, security_reviewer, critic, architect) investigate and report without edits; implementer edits and tests directly in the target cwd. Preflights Claude subscription authentication and supports exact saved UUID resume.",
+      "Start an interactive Claude Code subagent only when the user requests Claude, a named Claude model such as Fable or Opus, or explicitly selects this plugin. A generic review or second opinion is not a delegation request; discussion and quoted examples do not authorize a session. Read-only roles (explorer, reviewer, security_reviewer, critic, architect) report without edits; implementer edits and tests in the target cwd. Preflights subscription authentication and supports exact saved UUID resume.",
     inputSchema: interactiveSessionInput,
   },
   async (input) => textResult(await startInteractiveClaude(input)),
@@ -2597,7 +2602,8 @@ server.registerTool(
   "claude_interactive_send",
   {
     title: "Send To Interactive Claude Code",
-    description: "Paste text into a live interactive Claude Code PTY session, optionally submitting it.",
+    description:
+      "Paste text into a live interactive Claude Code PTY session for the user-requested Claude task, optionally submitting it. An existing session does not authorize unrelated work or unrequested review/fix loops.",
     inputSchema: {
       cwd: z.string().describe("Absolute path to the same target project directory."),
       interactive_id: z.string().min(1).describe("Interactive session id from claude_interactive_start."),
@@ -2634,7 +2640,7 @@ server.registerTool(
   {
     title: "Request Interactive Claude Code",
     description:
-      "Submit one correlated Claude Code main turn and wait for native turn.complete or StopFailure. done means main-turn completion, not acceptance of all work; inspect work_pending/count_unknown. Markers and silence never prove completion. Idle and timeout remain resumable by request id.",
+      "Submit one correlated main turn for the user-requested Claude task and wait for native turn.complete or StopFailure. Review-only requests do not authorize fixes or a fix/re-review loop. done means main-turn completion, not acceptance of all work; inspect work_pending/count_unknown. Markers and silence never prove completion. Idle and timeout remain resumable by request id.",
     inputSchema: {
       cwd: z.string().describe("Absolute path to the same target project directory."),
       interactive_id: z.string().min(1).describe("Interactive session id from claude_interactive_start."),
@@ -3129,7 +3135,7 @@ server.registerTool(
         forwarded_claude_arg_flags: [...FORWARDED_CLAUDE_ARG_FLAGS.keys()],
         model_passthrough: true,
         effort_passthrough: true,
-        model_effort_default_source: MODEL_EFFORT_DEFAULT_SOURCE,
+        model_effort_default_source: "plugin_role_and_claude_code",
       },
       mcp_presets: {
         default_read_only: DEFAULT_READ_ONLY_MCP_PRESET,

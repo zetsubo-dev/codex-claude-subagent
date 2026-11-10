@@ -110,4 +110,36 @@ try {
 } finally {
   fs.rmSync(dir, { recursive: true, force: true });
 }
+const pagedDir = fs.mkdtempSync(path.join(os.tmpdir(), "subagent-observer-pages-"));
+try {
+  const total = 8193;
+  for (let seq = 1; seq <= total; seq += 1) {
+    fs.writeFileSync(
+      path.join(pagedDir, `event-${String(seq).padStart(8, "0")}.json`),
+      JSON.stringify({
+        schema: 1,
+        seq,
+        generation: "pages",
+        session_id: session,
+        kind: seq === total ? "turn.complete" : "turn.start",
+      }),
+    );
+  }
+  const firstPage = readObserverRecords(pagedDir, "pages", 0);
+  assert.equal(firstPage.length, 4096);
+  assert.equal(firstPage.at(-1).event.seq, 4096);
+  const secondPage = readObserverRecords(pagedDir, "pages", firstPage.at(-1).event.seq);
+  assert.equal(secondPage.length, 4096, "consumed records starved the next observer page");
+  assert.equal(secondPage[0].event.seq, 4097);
+  assert.equal(secondPage.at(-1).event.seq, 8192);
+  const finalPage = readObserverRecords(pagedDir, "pages", secondPage.at(-1).event.seq);
+  assert.equal(finalPage.length, 1);
+  assert.equal(finalPage[0].event.seq, total);
+  assert.equal(finalPage[0].event.kind, "turn.complete", "completion beyond the page limit was lost");
+  const exhausted = readObserverRecords(pagedDir, "pages", total);
+  assert.equal(exhausted.length, 0);
+  assert.equal(exhausted.pending, false);
+} finally {
+  fs.rmSync(pagedDir, { recursive: true, force: true });
+}
 console.log("native observer tests passed");

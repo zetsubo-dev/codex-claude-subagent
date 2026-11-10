@@ -15,6 +15,7 @@ const archivePath = path.join(outputDir, `${archiveName}.zip`);
 
 const releaseFiles = [
   "Install.command",
+  "scripts/install.mjs",
   "LICENSE",
   ".agents/plugins/marketplace.json",
   "README.md",

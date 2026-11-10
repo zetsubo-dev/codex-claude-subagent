@@ -47,6 +47,11 @@ Useful focused commands are `pnpm run build`, `pnpm run format:check`,
 pnpm run smoke:live -- /absolute/project/path
 ```
 
+`pnpm run test:installer` covers installer regressions without Codex authentication.
+`pnpm run smoke:installer` exercises real Codex CLIs against isolated local Git
+fixtures and child-process-only configuration homes. It must pass before a release
+that changes the installer; it does not update the user's installation.
+
 `server.bundle.mjs` is a committed generated artifact. Edit source files under
 the plugin, then run `pnpm run build`; do not hand-edit the bundle.
 
@@ -55,8 +60,11 @@ the plugin, then run `pnpm run build`; do not hand-edit the bundle.
 The end-user distribution is a prebuilt ZIP containing the repository
 marketplace and `Install.command`. `Install.command` is a tracked installer
 source file; `pnpm run build` does not generate it. The release packaging
-command verifies the bundle and tests first, then creates the ZIP under the
-ignored `dist/` directory:
+command installs from the frozen lockfile so the build uses the audited
+dependency versions, audits all dependencies (including development dependencies),
+verifies the bundle and tests, then creates the ZIP under the ignored `dist/` directory.
+The audit requires registry access and blocks packaging on any reported
+vulnerability or audit failure; run it separately with `pnpm run audit:security`:
 
 ```sh
 pnpm run plugin:cachebuster
@@ -66,11 +74,19 @@ pnpm run release:package
 Before running the commands, update the root package, plugin package, and
 manifest base versions together. Review the generated
 `dist/codex-claude-subagent-v<VERSION>.zip` and confirm it contains
-`Install.command`, both `LICENSE` files, `.agents/plugins/marketplace.json`,
+`Install.command`, `scripts/install.mjs`, both `LICENSE` files, `.agents/plugins/marketplace.json`,
 the bundled server, and both bridge scripts. Do not include `node_modules` or
 development-only files in the release ZIP. Commit the source, generated bundle,
 installer, license, and metadata changes; attach the generated ZIP to the
-matching GitHub Release.
+matching GitHub Release. The installer fetches the official Git marketplace and
+requires an exact match with the ZIP's plugin version and distributed files.
+Push the reviewed commit to the default branch and create the matching version
+tag before publishing the ZIP. Compare every ZIP file with that tagged commit;
+do not regenerate the cachebuster after committing without rebuilding and committing
+the changed metadata. A ZIP built from uncommitted changes is not publication proof.
+Change default-branch plugin distribution files only for a release, and publish
+the matching ZIP whenever they change; otherwise even the latest release ZIP
+will fail the exact-match preflight. Keep unreleased work on develop.
 
 Oxfmt formats JavaScript and JSON from the repository root. It excludes the
 generated bundle, lockfiles, Markdown, and Python files. Oxlint checks the

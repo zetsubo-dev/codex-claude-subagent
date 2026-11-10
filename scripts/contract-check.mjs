@@ -36,15 +36,20 @@ const normalizedDocs = `${skill}\n${pluginReadme}`.replace(/\s+/g, " ");
 assertContract(rootPackage.name === "codex-claude-subagent-workspace", "root package name");
 assertContract(rootPackage.private === true, "root package must be private");
 assertContract(rootPackage.license === "MIT", "root package license");
-assertContract(rootPackage.packageManager === "pnpm@11.10.0", "root package manager");
+assertContract(rootPackage.packageManager === "pnpm@12.18.0", "root package manager");
 assertContract(rootPackage.version === pluginPackage.version, "root/plugin versions must match");
 assertContract(rootPackage.scripts["check:contract"] === "node scripts/contract-check.mjs", "root contract script");
 assertContract(
-  rootPackage.scripts["release:package"] === "pnpm run build && pnpm run verify && node scripts/package-release.mjs",
+  rootPackage.scripts["audit:security"] === "pnpm audit --audit-level=low",
+  "release dependency security audit",
+);
+assertContract(
+  rootPackage.scripts["release:package"] ===
+    "pnpm run deps:install && pnpm run audit:security && pnpm run build && pnpm run verify && node scripts/package-release.mjs",
   "release package script",
 );
 assertContract(
-  rootPackage.scripts.verify === "pnpm run check && pnpm test && pnpm run smoke:package",
+  rootPackage.scripts.verify === "pnpm run check && pnpm test && pnpm run test:installer && pnpm run smoke:package",
   "root verify script",
 );
 
@@ -78,6 +83,12 @@ assertContract(
 assertContract(server.includes("forwards_allowlisted_interactive_claude_args: true"), "interactive Claude args policy");
 assertContract(fs.existsSync(installer), "release installer missing");
 assertContract((fs.statSync(installer).mode & 0o111) !== 0, "release installer must be executable");
+assertContract(fs.existsSync(path.join(rootDir, "scripts/install.mjs")), "verified installer entrypoint");
+assertContract(
+  readText("Install.command").includes("scripts/install.mjs"),
+  "installer delegates to verified entrypoint",
+);
+assertContract(!readText("Install.command").includes("installation completed"), "no unverified installer success");
 assertContract(normalizedDocs.includes("claude_args"), "interactive Claude args documentation");
 assertContract(normalizedDocs.includes("role contract"), "machine-readable role contract documentation");
 assertContract(

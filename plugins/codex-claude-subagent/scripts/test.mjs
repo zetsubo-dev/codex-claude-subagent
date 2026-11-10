@@ -630,7 +630,13 @@ assert(info.policy.default_subagent_mode === "disabled", "single-agent default w
 assert(info.policy.effort_passthrough === true, "effort pass-through policy was not reported");
 assert(Array.isArray(info.policy.forwarded_claude_arg_flags), "forwarded Claude argument policy was not reported");
 assert(!Object.hasOwn(info.roles, "test_runner"), "Bash-capable test_runner role should not be exposed");
-for (const role of ["security_reviewer", "critic", "architect"]) {
+for (const role of ["reviewer", "security_reviewer", "critic"]) {
+  assert(info.roles[role].model === "opus", `${role} did not expose the Opus review default`);
+  assert(info.roles[role].effort === null, `${role} unexpectedly selected effort`);
+  assert(info.roles[role].model_default_source === "plugin_role", `${role} did not report its model default source`);
+  assert(info.roles[role].effort_default_source === "claude_code", `${role} did not preserve effort ownership`);
+}
+for (const role of ["explorer", "architect", "implementer"]) {
   assert(info.roles[role].model === null, `${role} did not defer model selection to Claude Code`);
   assert(info.roles[role].effort === null, `${role} did not defer effort selection to Claude Code`);
   assert(
@@ -638,7 +644,10 @@ for (const role of ["security_reviewer", "critic", "architect"]) {
     `${role} did not report Claude Code default ownership`,
   );
 }
-assert(info.policy.model_effort_default_source === "claude_code", "default ownership was not reported");
+assert(
+  info.policy.model_effort_default_source === "plugin_role_and_claude_code",
+  "role model and Claude Code effort default ownership was not reported",
+);
 
 const tools = await client.listTools();
 const toolNames = tools.tools.map((tool) => tool.name);
@@ -1629,6 +1638,61 @@ const explicitLegacyModelStop = parseToolResult(
 );
 assert(explicitLegacyModelStop.stop.exited === true, "explicit legacy model session did not exit after stop");
 
+const namedReviewSessions = [];
+for (const model of ["fable", "opus"]) {
+  const started = parseToolResult(
+    await client.callTool({
+      name: "claude_interactive_start",
+      arguments: { cwd: plainProjectDir, role: "reviewer", model, mcp_preset: "none" },
+    }),
+  );
+  namedReviewSessions.push(started);
+  assert(started.status === "running", `${model} reviewer did not start`);
+  assert(started.resolved.model === model, `${model} reviewer model was not preserved`);
+  assert(
+    started.args_preview[started.args_preview.indexOf("--model") + 1] === model,
+    `${model} reviewer model was not passed as a structured CLI option`,
+  );
+  assert(started.resolved.effort === null, `${model} reviewer unexpectedly selected effort`);
+  assert(!started.args_preview.includes("--effort"), `${model} reviewer unexpectedly passed effort`);
+  assert(started.resolved.subagent_mode === "disabled", `${model} reviewer enabled nested delegation`);
+}
+assert(
+  namedReviewSessions[0].interactive_id !== namedReviewSessions[1].interactive_id &&
+    namedReviewSessions[0].claude_session_id !== namedReviewSessions[1].claude_session_id,
+  "Fable and Opus reviews unexpectedly shared a conversation",
+);
+for (const started of namedReviewSessions) {
+  const stopped = parseToolResult(
+    await client.callTool({
+      name: "claude_interactive_stop",
+      arguments: { cwd: plainProjectDir, interactive_id: started.interactive_id },
+    }),
+  );
+  assert(stopped.stop.exited === true, "named reviewer session did not exit after stop");
+}
+const resumedFableReview = parseToolResult(
+  await client.callTool({
+    name: "claude_interactive_start",
+    arguments: {
+      cwd: plainProjectDir,
+      role: "reviewer",
+      resume_claude_session_id: namedReviewSessions[0].claude_session_id,
+      mcp_preset: "none",
+    },
+  }),
+);
+assert(resumedFableReview.resolved.resume_mode === "resume", "Fable review did not resume");
+assert(!resumedFableReview.args_preview.includes("--model"), "review default overrode the resumed Fable conversation");
+assert(resumedFableReview.resolved.effort === null, "resumed review unexpectedly selected effort");
+const resumedFableStop = parseToolResult(
+  await client.callTool({
+    name: "claude_interactive_stop",
+    arguments: { cwd: plainProjectDir, interactive_id: resumedFableReview.interactive_id },
+  }),
+);
+assert(resumedFableStop.stop.exited === true, "resumed Fable review did not exit after stop");
+
 const interactiveStart = parseToolResult(
   await client.callTool({
     name: "claude_interactive_start",
@@ -1663,9 +1727,12 @@ assert(
   "resolved Claude session id did not match session",
 );
 assert(interactiveStart.resolved.resume_mode === "new", "new interactive session did not use new resume mode");
-assert(interactiveStart.resolved.model === null, "new reviewer session did not defer model selection to Claude Code");
+assert(interactiveStart.resolved.model === "opus", "new reviewer session did not default to Opus");
 assert(interactiveStart.resolved.effort === null, "new reviewer session did not defer effort selection to Claude Code");
-assert(!interactiveStart.args_preview.includes("--model"), "new reviewer session unexpectedly passed a model");
+assert(
+  interactiveStart.args_preview[interactiveStart.args_preview.indexOf("--model") + 1] === "opus",
+  "new reviewer session did not pass the Opus model default",
+);
 assert(!interactiveStart.args_preview.includes("--effort"), "new reviewer session unexpectedly passed an effort");
 assert(interactiveStart.args_preview.includes("--session-id"), "new interactive session did not pass --session-id");
 assert(

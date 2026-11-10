@@ -1,6 +1,6 @@
 {
   "name": "codex-claude-subagent",
-  "version": "0.3.0+codex.20261110041850524.476d6a",
+  "version": "0.4.0+codex.20261110080928848.c65aff",
   "description": "Use interactive Claude Code as a role-controlled subagent from Codex via MCP.",
   "license": "MIT",
   "author": {
@@ -10,7 +10,7 @@
   "interface": {
     "displayName": "Codex–Claude Subagent",
     "shortDescription": "Use Claude Code as a subagent from Codex.",
-    "longDescription": "Codex–Claude Subagent exposes interactive Claude Code sessions through MCP using your claude.ai login. Model and effort requests are passed as structured inputs; omitted values use Claude Code defaults. Sessions use official native lifecycle observation for completion and support exact resume, waiting, log paging, listing, and stopping. Claude runs alone by default; explicitly requested native subagents are available for implementation.",
+    "longDescription": "Codex–Claude Subagent exposes interactive Claude Code sessions through MCP using your claude.ai login. Explicit Claude or named-model requests select this route; generic reviews stay with Codex. New reviews default to Opus; other roles and unspecified effort use Claude Code defaults. Explicit model choices take precedence. Sessions use official native lifecycle observation for completion and support exact resume, waiting, log paging, listing, and stopping. Claude runs alone by default; explicitly requested native subagents are available for implementation.",
     "developerName": "zetsubo",
     "category": "Developer Tools",
     "capabilities": ["Interactive", "Read", "Review", "Implement"],

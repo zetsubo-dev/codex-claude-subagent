@@ -1,6 +1,6 @@
 {
   "name": "codex-claude-subagent",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Local MCP server that lets AI agents orchestrate role-controlled interactive Claude Code sessions.",
   "keywords": [
     "agent",
@@ -24,11 +24,11 @@
     "test": "node scripts/lib.test.mjs && node scripts/observer.test.mjs && node scripts/check-bundle.test.mjs && node scripts/test.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
-    "zod": "^3.25.76"
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
-    "esbuild": "^0.28.1"
+    "esbuild": "^0.28.2"
   },
   "engines": {
     "node": ">=20"

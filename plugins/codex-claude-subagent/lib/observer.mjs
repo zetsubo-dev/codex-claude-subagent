@@ -8,11 +8,10 @@ export function readObserverRecords(directory, generation, afterSeq) {
   let expected = afterSeq + 1;
   const files = fs
     .readdirSync(directory)
-    .filter((name) => /^event-\d{8}\.json$/.test(name))
+    .filter((name) => /^event-\d{8}\.json$/.test(name) && Number(name.slice(6, 14)) > afterSeq)
     .sort()
     .slice(0, 4096);
   for (const [index, file] of files.entries()) {
-    if (Number(file.slice(6, 14)) <= afterSeq) continue;
     const target = path.join(directory, file);
     const stat = fs.lstatSync(target);
     if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 512 * 1024) continue;
