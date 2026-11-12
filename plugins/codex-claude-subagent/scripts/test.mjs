@@ -4,6 +4,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import vm from "node:vm";
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-claude-subagent-test-"));
 const stateDir = path.join(tmpRoot, "state");
@@ -197,11 +198,11 @@ function nativeEvent(kind, extra = {}) {
   fs.writeFileSync(dir + "/event-" + String(seq).padStart(8,"0") + ".json", JSON.stringify(event));
 }
 function nativeComplete(extra) {
-  const raw = String(extra.last_assistant_message || "");
+  const raw = process.env.FAKE_CLAUDE_NATIVE_EMPTY === "1" ? "" : String(extra.last_assistant_message || "");
   let answer = raw.slice(0, 64000);
   const code = answer.charCodeAt(answer.length - 1);
   if (code >= 0xd800 && code <= 0xdbff) answer = answer.slice(0,-1);
-  if (answer.length < raw.length) answer += "\\n[codex-claude-subagent: response truncated; read terminal log]";
+  if (answer.length < raw.length) answer += "\\n[codex-claude-subagent: native answer truncated to at most 64,000 UTF-16 code units; the rest is not in this field and may or may not be in the terminal log]";
   const reason = process.env.FAKE_CLAUDE_NATIVE_REASON || "answer";
   nativeEvent("turn.complete", { reason, is_aborted: reason === "aborted", agent_id: null,
     answer,
@@ -245,10 +246,12 @@ if (process.env.FAKE_CLAUDE_CAP_OUTPUT === "1") {
   console.log("fake interactive ready");
 }
 setTimeout(() => emitHook("SessionStart", {}), 10);
+if (process.env.FAKE_CLAUDE_EXACT_BODY === "1" && process.stdin.isTTY) process.stdin.setRawMode(true);
 process.stdin.setEncoding("utf8");
 let inputBuffer = "";
 let helloHandled = false;
 let reviewHandled = false;
+let exactBodyHandled = false;
 let neverHandled = false;
 let silentHandled = false;
 let retrySubmitHandled = false;
@@ -277,6 +280,11 @@ function submittedPrompt() {
 process.stdin.on("data", (data) => {
   if (process.env.FAKE_CLAUDE_INPUT_LOG) fs.appendFileSync(process.env.FAKE_CLAUDE_INPUT_LOG, data);
   inputBuffer += data;
+  if (process.env.FAKE_CLAUDE_EXACT_BODY === "1" && !exactBodyHandled && inputBuffer.includes("\\x1b[201~\\r")) {
+    exactBodyHandled = true;
+    emitHook("UserPromptSubmit", submittedPrompt());
+    emitHook("Stop", { last_assistant_message: "ORDINARY_CONTEXT_INTEGRITY_SENTINEL_🙂" });
+  }
   if (!helloHandled && hasSubmittedText("hello interactive")) {
     helloHandled = true;
     emitHook("UserPromptSubmit", submittedPrompt());
@@ -483,6 +491,69 @@ function parseToolResult(result) {
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
+}
+
+// Run the production pure projection against frozen, aliased canonical data.
+// Integration tests below cover the actual MCP serialization and registry.
+{
+  const source = fs.readFileSync(new URL("../server.mjs", import.meta.url), "utf8");
+  const project = vm.runInNewContext(
+    source.slice(source.indexOf("function projectPublicResponse("), source.indexOf("function textResult(")) +
+      "\nprojectPublicResponse",
+  );
+  const event = Object.freeze({
+    answer: "projection sentinel",
+    last_assistant_message: "projection sentinel",
+    answer_truncated: true,
+    last_assistant_message_truncated: true,
+    notification_type: "permission_prompt",
+  });
+  const wait = Object.freeze({ reason: "hook", matched_hook: event });
+  const request = Object.freeze({ result_text: "projection sentinel", completion_event: event, last_wait: wait, wait });
+  const canonical = Object.freeze({
+    request,
+    last_request: request,
+    active_request: null,
+    wait,
+    last_hook_event: event,
+    latest_native_outcome: Object.freeze({ answer: "projection sentinel" }),
+  });
+  const before = JSON.stringify(canonical);
+  const view = project(canonical);
+  assert(canonical.wait === canonical.request.last_wait, "canonical wait alias was lost");
+  assert(JSON.stringify(canonical) === before, "public projection mutated canonical state");
+  assert(view.request !== request && view.request.last_wait !== wait, "projection reused canonical request/wait");
+  for (const projectedEvent of [
+    view.request.completion_event,
+    view.request.last_wait.matched_hook,
+    view.request.wait.matched_hook,
+    view.wait.matched_hook,
+  ]) {
+    assert(
+      !Object.hasOwn(projectedEvent, "answer") && !Object.hasOwn(projectedEvent, "last_assistant_message"),
+      "duplicate event text remained",
+    );
+    assert(
+      projectedEvent.answer_truncated &&
+        projectedEvent.last_assistant_message_truncated &&
+        projectedEvent.notification_type === "permission_prompt",
+      "projection removed event metadata",
+    );
+  }
+  assert(!Object.hasOwn(view.last_hook_event, "last_assistant_message"), "session duplicate remained");
+  assert(!Object.hasOwn(view.latest_native_outcome, "answer_truncated"), "legacy truncation became false");
+  for (const result_text of [null, "different text"]) {
+    const unique = project({ request: { ...request, result_text }, last_hook_event: event });
+    assert(unique.request.completion_event.answer === event.answer, "unique answer was deleted");
+    assert(
+      unique.request.last_wait.matched_hook.last_assistant_message === event.last_assistant_message,
+      "unique wait diagnostic was deleted",
+    );
+    assert(
+      unique.last_hook_event.last_assistant_message === event.last_assistant_message,
+      "unmatched session diagnostic was deleted",
+    );
+  }
 }
 
 async function waitForFile(filePath, timeoutMs = 2000) {
@@ -1062,6 +1133,8 @@ for (const mode of [
   "delayed-native",
   "background",
   "unknown-count",
+  "empty-answer",
+  "unknown-reason",
   "blocked",
   "cron",
   "tokenless",
@@ -1080,6 +1153,8 @@ for (const mode of [
     ...(mode === "delayed-native" ? { FAKE_CLAUDE_NATIVE_DELAY_MS: "800" } : {}),
     ...(mode === "background" ? { FAKE_CLAUDE_BACKGROUND_PENDING: "1" } : {}),
     ...(mode === "unknown-count" ? { FAKE_CLAUDE_BACKGROUND_PENDING: "unknown" } : {}),
+    ...(mode === "empty-answer" ? { FAKE_CLAUDE_NATIVE_EMPTY: "1" } : {}),
+    ...(mode === "unknown-reason" ? { FAKE_CLAUDE_NATIVE_REASON: "unrecognized" } : {}),
     ...(mode === "blocked" ? { FAKE_CLAUDE_STOP_BLOCKED: "1" } : {}),
     ...(mode === "tokenless" ? { FAKE_CLAUDE_TOKENLESS_WAKE: "1" } : {}),
     ...(["aborted", "error", "refusal"].includes(mode) ? { FAKE_CLAUDE_NATIVE_REASON: mode } : {}),
@@ -1138,6 +1213,37 @@ for (const mode of [
         },
       });
       assert(!next.isError, "background count left an input lock after main completion");
+    } else if (mode === "empty-answer") {
+      assert(response.request.done && response.request.status === "completed", "empty answer changed completion");
+      assert(
+        response.request.result_text === null && response.latest_native_outcome.answer === null,
+        "no captured text was not null",
+      );
+      assert(
+        response.latest_native_outcome.answer_truncated === false && response.request.result_text_truncated === false,
+        "empty answer was reported truncated",
+      );
+      const emptyView = parseToolResult(
+        await isolated.client.callTool({
+          name: "claude_interactive_read",
+          arguments: { cwd: plainProjectDir, interactive_id: started.interactive_id },
+        }),
+      );
+      assert(
+        emptyView.last_request.result_text === null && emptyView.latest_native_outcome.answer === null,
+        "read changed null answer semantics",
+      );
+    } else if (mode === "unknown-reason") {
+      assert(
+        !response.request.done &&
+          response.request.pending &&
+          response.request.attention_required?.reason === "completion_unconfirmed",
+        "unknown reason claimed completion",
+      );
+      assert(
+        response.request.result_text === null && response.request.provisional_result_text === "review complete",
+        "unknown reason lost provisional answer",
+      );
     } else if (mode === "unknown-count") {
       assert(
         response.request.done && response.request.count_unknown && !response.request.work_pending,
@@ -1216,6 +1322,187 @@ for (const mode of [
   });
   await isolated.client.close();
   activeClients.delete(isolated.client);
+}
+
+// This receiver records raw-mode PTY input; it does not model live Claude's
+// paste handling or establish what a live model receives.
+{
+  const integrityState = path.join(tmpRoot, "state-context-integrity");
+  const inputLog = path.join(tmpRoot, "exact-body-input.log");
+  const isolated = createTestClient(integrityState, {
+    FAKE_CLAUDE_INPUT_LOG: inputLog,
+    FAKE_CLAUDE_EXACT_BODY: "1",
+  });
+  await isolated.client.connect(isolated.transport);
+  const call = async (name, args = {}) =>
+    parseToolResult(
+      await isolated.client.callTool({
+        name,
+        arguments: { cwd: plainProjectDir, ...args },
+      }),
+    );
+  const started = await call("claude_interactive_start", { role: "reviewer", mcp_preset: "none" });
+  const sessionArgs = { interactive_id: started.interactive_id };
+  const callerText =
+    "  User 1:\n日本語の原文🙂 e\u0301\u3000\u00a0\t  \n\n" +
+    "first section  ".repeat(180) +
+    "\n\nAssistant proposal (not adopted):\n案を仮置きします。\n\n" +
+    "User 2 (correction):\n中央の訂正: その案は採用していません。\t  \n\n" +
+    "last section  ".repeat(180) +
+    "\nUser 3:\n引用の順序と空白を保つ。  \n\t  ";
+  const response = await call("claude_interactive_request", {
+    ...sessionArgs,
+    text: callerText,
+    idle_ms: null,
+    timeout_ms: 3000,
+  });
+  const bytes = fs.readFileSync(inputLog);
+  const pasteStart = bytes.lastIndexOf(Buffer.from("\x1b[200~"));
+  const pasteEnd = bytes.indexOf(Buffer.from("\x1b[201~"), pasteStart);
+  assert(pasteStart >= 0 && pasteEnd > pasteStart, "receiver did not capture a bracketed paste");
+  const frameBytes = bytes.subarray(pasteStart + Buffer.byteLength("\x1b[200~"), pasteEnd);
+  const frame = frameBytes.toString("utf8");
+  const label = "Request from the calling Codex agent:\n";
+  const labelAt = frame.indexOf(label);
+  const bodyAt = labelAt + label.length;
+  const protocolAt = frame.lastIndexOf("\n\nCompletion protocol:\n");
+  assert(
+    frame.startsWith(`Codex–Claude Subagent correlation token: ${response.request.hook_correlation_token}\n\n`),
+    "correlation token was not first",
+  );
+  assert(
+    frame.indexOf("Review-only boundary:") >= 0 && frame.indexOf("Review-only boundary:") < labelAt,
+    "role boundary did not precede caller label",
+  );
+  assert(labelAt >= 0 && protocolAt > bodyAt, "caller framing was missing");
+  assert(frame.slice(bodyAt, protocolAt) === callerText, "caller body changed, including its middle or whitespace");
+  assert(
+    frameBytes
+      .subarray(Buffer.byteLength(frame.slice(0, bodyAt)), Buffer.byteLength(frame.slice(0, protocolAt)))
+      .equals(Buffer.from(callerText, "utf8")),
+    "PTY receiver body was not byte-identical UTF-8",
+  );
+
+  const sentinel = "ORDINARY_CONTEXT_INTEGRITY_SENTINEL_🙂";
+  const assertTextPaths = (view, withRequest, surface) => {
+    const paths = [];
+    const walk = (value, at = "") => {
+      if (typeof value === "string") {
+        if (value.includes(sentinel)) paths.push(at);
+      } else if (value && typeof value === "object") {
+        for (const [key, child] of Object.entries(value)) {
+          if (!["output_tail", "chunks"].includes(key)) walk(child, at ? `${at}.${key}` : key);
+        }
+      }
+    };
+    walk(view);
+    const expected = [
+      "last_request.result_text",
+      "latest_native_outcome.answer",
+      ...(withRequest ? ["request.result_text"] : []),
+    ];
+    assert(
+      JSON.stringify(paths.sort()) === JSON.stringify(expected.sort()),
+      `${surface}: unexpected sentinel paths ${JSON.stringify(paths)}`,
+    );
+    assert(
+      view.last_request.result_text === sentinel && (!withRequest || view.request.result_text === sentinel),
+      `${surface}: canonical result_text changed`,
+    );
+    assert(view.latest_native_outcome.answer_truncated === false, `${surface}: native truncation flag missing`);
+  };
+  assertTextPaths(response, true, "request");
+  assertTextPaths(
+    await call("claude_interactive_wait_request", {
+      ...sessionArgs,
+      request_id: response.request.request_id,
+      timeout_ms: 100,
+    }),
+    true,
+    "wait_request",
+  );
+  assertTextPaths(await call("claude_interactive_read", sessionArgs), false, "live read");
+  const sessionFrom = (result) => result.sessions.find((session) => session.interactive_id === started.interactive_id);
+  assertTextPaths(sessionFrom(await call("claude_interactive_list")), false, "live list");
+
+  const registryFile = path.join(integrityState, "interactive-sessions.json");
+  const storedSession = () =>
+    JSON.parse(fs.readFileSync(registryFile, "utf8")).sessions.find(
+      (session) => session.interactive_id === started.interactive_id,
+    );
+  await waitForCondition(() => storedSession()?.last_request?.result_text === sentinel, 3000);
+  const reader = createTestClient(integrityState);
+  await reader.client.connect(reader.transport);
+  const readCall = async (name, args = {}) =>
+    parseToolResult(await reader.client.callTool({ name, arguments: { cwd: plainProjectDir, ...args } }));
+  const persisted = await readCall("claude_interactive_read", sessionArgs);
+  assert(
+    persisted.control_available === false && persisted.read_only_snapshot,
+    "second process did not use persisted reader",
+  );
+  assertTextPaths(persisted, false, "persisted read");
+  assertTextPaths(sessionFrom(await readCall("claude_interactive_list")), false, "persisted list");
+  assertTextPaths(
+    sessionFrom(await readCall("claude_interactive_saved_sessions")),
+    false,
+    "second process saved_sessions",
+  );
+  assertTextPaths(sessionFrom(await call("claude_interactive_saved_sessions")), false, "owner saved_sessions");
+  assert(
+    storedSession().last_request.completion_event.last_assistant_message === sentinel,
+    "public projection stripped canonical registry event body",
+  );
+  assert(
+    storedSession().last_request.last_wait.matched_hook.answer === sentinel,
+    "public projection stripped canonical wait body",
+  );
+
+  // A manual-send failure has no new correlated request. Its unique diagnostic
+  // must survive without overwriting the earlier request, even after reading.
+  await call("claude_interactive_send", { ...sessionArgs, text: "hook failure request" });
+  let manualFailure;
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    manualFailure = await call("claude_interactive_read", sessionArgs);
+    if (manualFailure.last_hook_event?.hook_event_name === "StopFailure") break;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  const assertManualFailure = (view, surface) => {
+    assert(
+      view.last_hook_event?.hook_event_name === "StopFailure" &&
+        view.last_hook_event.error === "rate_limit" &&
+        view.last_hook_event.last_assistant_message === "rate limited",
+      `${surface}: unique manual-send failure disappeared`,
+    );
+    for (const field of ["result_text", "status", "done", "terminal_state"]) {
+      assert(
+        view.last_request[field] === response.request[field],
+        `${surface}: manual failure changed previous ${field}`,
+      );
+    }
+  };
+  assertManualFailure(manualFailure, "live manual failure");
+  assertManualFailure(sessionFrom(await call("claude_interactive_list")), "list manual failure");
+  // Manual hooks alone do not promise an immediate registry flush. Stopping
+  // this throwaway session persists the canonical snapshot without a new turn.
+  await call("claude_interactive_stop", sessionArgs);
+  await waitForCondition(() => storedSession()?.status === "exited", 3000);
+  assertManualFailure(await readCall("claude_interactive_read", sessionArgs), "persisted manual failure");
+  assertManualFailure(sessionFrom(await readCall("claude_interactive_saved_sessions")), "saved manual failure");
+  await isolated.client.close();
+  activeClients.delete(isolated.client);
+  // Simulate an older canonical registry without the additive native flag.
+  const legacyRegistry = JSON.parse(fs.readFileSync(registryFile, "utf8"));
+  const legacySession = sessionFrom(legacyRegistry);
+  delete legacySession.latest_native_outcome.answer_truncated;
+  fs.writeFileSync(registryFile, JSON.stringify(legacyRegistry));
+  for (const name of ["claude_interactive_read", "claude_interactive_list", "claude_interactive_saved_sessions"]) {
+    const result = await readCall(name, name === "claude_interactive_read" ? sessionArgs : {});
+    const view = result.sessions ? sessionFrom(result) : result;
+    assert(!Object.hasOwn(view.latest_native_outcome, "answer_truncated"), `${name}: legacy unknown flag became false`);
+    assert(view.last_request.result_text === sentinel, `${name}: legacy reader lost result_text`);
+  }
+  await reader.client.close();
+  activeClients.delete(reader.client);
 }
 
 let unsafeToolResult;
@@ -2292,10 +2579,41 @@ assert(longHookResult.request.done === true, "long hook result request did not c
 assert(longHookResult.request.result_text_truncated === true, "long hook result did not report truncation");
 assert(longHookResult.request.result_text.startsWith("RESULT_BEGIN_"), "long hook result lost its prefix");
 assert(
-  longHookResult.request.result_text.includes("[codex-claude-subagent: response truncated; read terminal log]"),
+  longHookResult.request.result_text.includes(
+    "[codex-claude-subagent: native answer truncated to at most 64,000 UTF-16 code units; the rest is not in this field and may or may not be in the terminal log]",
+  ),
   "long hook result lacked a truncation marker",
 );
 assert(!longHookResult.request.result_text.includes("�"), "long hook result split a Unicode character");
+assert(longHookResult.latest_native_outcome.answer_truncated === true, "session native outcome lost truncation flag");
+assert(
+  longHookResult.latest_native_outcome.answer === longHookResult.request.result_text,
+  "session native outcome re-sliced the clipped answer or marker",
+);
+for (const name of ["claude_interactive_read", "claude_interactive_saved_sessions"]) {
+  const result = parseToolResult(
+    await client.callTool({
+      name,
+      arguments: {
+        cwd: plainProjectDir,
+        ...(name === "claude_interactive_read" ? { interactive_id: interactiveStart.interactive_id } : {}),
+      },
+    }),
+  );
+  const view = result.sessions
+    ? result.sessions.find((session) => session.interactive_id === interactiveStart.interactive_id)
+    : result;
+  assert(
+    view.latest_native_outcome.answer_truncated === true &&
+      view.latest_native_outcome.answer === longHookResult.request.result_text,
+    `${name}: long native answer marker/flag lost`,
+  );
+  assert(
+    view.last_request.result_text_truncated === true &&
+      view.last_request.result_text === longHookResult.request.result_text,
+    `${name}: long request answer marker/flag lost`,
+  );
+}
 
 const firstSeq = utf8Visible.next_seq;
 const interactiveSend = parseToolResult(

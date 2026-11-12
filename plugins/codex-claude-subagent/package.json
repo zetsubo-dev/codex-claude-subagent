@@ -1,6 +1,6 @@
 {
   "name": "codex-claude-subagent",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Local MCP server that lets AI agents orchestrate role-controlled interactive Claude Code sessions.",
   "keywords": [
     "agent",

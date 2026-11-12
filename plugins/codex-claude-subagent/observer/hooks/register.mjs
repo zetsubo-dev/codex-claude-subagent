@@ -45,7 +45,11 @@ function clip(text) {
   if (code >= 0xd800 && code <= 0xdbff) end -= 1;
   const truncated = end < text.length;
   return {
-    text: text.slice(0, end) + (truncated ? "\n[codex-claude-subagent: response truncated; read terminal log]" : ""),
+    text:
+      text.slice(0, end) +
+      (truncated
+        ? "\n[codex-claude-subagent: native answer truncated to at most 64,000 UTF-16 code units; the rest is not in this field and may or may not be in the terminal log]"
+        : ""),
     truncated,
   };
 }

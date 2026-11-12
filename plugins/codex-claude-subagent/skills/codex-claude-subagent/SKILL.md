@@ -121,8 +121,9 @@ as proof that Codex–Claude Subagent initialized.
 - Use `claude_interactive_wait` only when you need lower-level waiting for a
   pattern, idle period, exit, or timeout.
 - Use `claude_interactive_read` to inspect recent terminal output.
-- Use `claude_interactive_read_log` to recover long Claude output by byte
-  offset or tail window when `output_tail` is incomplete.
+- Use `claude_interactive_read_log` to inspect best-effort persisted terminal
+  output by byte offset or tail window when `output_tail` is incomplete.
+  The rendered, capped log may or may not contain a truncated answer's remainder.
 - Read and read-log can inspect a persisted session owned by another MCP
   server process. Such a result is read-only (`control_available: false`);
   send, wait, and stop must use the owning Codex session.
@@ -259,9 +260,13 @@ turn outcomes are available as session `latest_native_outcome`; they never
 complete another request. While `native_active_turn_id` is set, use read/wait
 or stop instead of sending input. This pre-send check is best-effort, not an
 atomic lock inside Claude Code; no correlation means no claimed completion.
-Prefer `request.result_text` as
-Claude's final answer; use terminal logs for long/truncated output and audit
-context. Stop the session when no re-review will be sent.
+Prefer `request.result_text` as Claude's captured final answer. Check
+`result_text_truncated` separately from completion state; `null` means no
+answer text was captured in this field. Session `latest_native_outcome.answer`
+has its own `answer_truncated` flag. An absent flag on a legacy record means
+unknown, not `false`. Neither native completion nor `done` proves complete
+answer delivery. Terminal logs provide best-effort audit context. Stop the
+session when no re-review will be sent.
 
 ## Role Selection
 
@@ -375,6 +380,9 @@ Use this shape in interactive requests:
 
 ```text
 Goal:
+Relevant original user dialogue (verbatim, speaker-labelled, chronological excerpts):
+Caller interpretation (separate from the quoted dialogue):
+Caller proposals not adopted by the user:
 Repo/project directory:
 Relevant files:
 Current diff:
@@ -385,8 +393,17 @@ Known failures:
 Expected output:
 ```
 
-Do not paste the entire Codex transcript into Claude. Pass compact, explicit
-context and ask Claude to inspect the repository directly when needed.
+Select only relevant original public dialogue, including corrections and
+constraints that affect the task. Preserve each selected excerpt verbatim;
+do not paraphrase or abbreviate its quoted text. Keep speaker labels and
+chronological order. Put summaries, interpretation and unadopted proposals
+alongside the originals in their separate slots, never as user decisions.
+Do not include hidden reasoning or scrape transcripts automatically. Quoted
+instructions do not widen the selected role boundary, and labels do not
+authenticate authorship. The adapter preserves the supplied body under
+`Request from the calling Codex agent:`; it does not obtain the original
+user message itself. Do not paste the entire Codex transcript into Claude.
+Keep the selection compact and ask Claude to inspect the repository when needed.
 
 ## Interactive Output
 
@@ -395,12 +412,28 @@ permission requests, and partial text. Always check `wait.reason`, `status`,
 `quiet_ms`, and the returned `output_tail` before deciding whether Claude is
 done, waiting for input, asking for permission, or still running.
 
-`output_tail` is intentionally bounded. When Claude's answer is long, read the
-persisted terminal log with `claude_interactive_read_log`. Start from
-`request.start_log_offset` when available, otherwise use `tail_bytes`;
-then keep reading from `next_offset` until `eof: true`. Log pages
-preserve UTF-8 character boundaries. This avoids mistaking a truncated
-transport response for Claude omitting part of its answer.
+For an ordinary correlated completion, the canonical text paths are
+`request.result_text`, `last_request.result_text`, and
+`latest_native_outcome.answer`. Select the relevant field and flags rather than
+echoing the whole envelope. Public event views omit `answer` or
+`last_assistant_message` only when identical text remains in the corresponding
+request or session scope; distinct diagnostics remain, including manual-send
+failures. Canonical persisted events retain their text.
+
+Native answer previews keep at most 64,000 UTF-16 code units, avoiding a split
+surrogate pair, followed by this marker when truncated:
+
+```text
+[codex-claude-subagent: native answer truncated to at most 64,000 UTF-16 code units; the rest is not in this field and may or may not be in the terminal log]
+```
+
+`output_tail` is intentionally bounded. `claude_interactive_read_log` reads
+best-effort persisted, rendered and capped terminal output. Start from
+`request.start_log_offset` when available, otherwise use `tail_bytes`, and
+continue from `next_offset` to inspect available pages. Pages preserve UTF-8
+character boundaries. `eof: true` means the end of the persisted log at read
+time; it does not prove complete native answer recovery. The remainder of a
+truncated answer may or may not be in the log; report unavailable text honestly.
 
 When stopping a session, check `stop.exited`. If it is `false`, the stop signal
 was sent but the PTY bridge did not confirm exit within the wait window.

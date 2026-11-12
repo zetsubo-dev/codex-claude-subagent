@@ -575,12 +575,60 @@ function persistInteractiveSession(session) {
   );
 }
 
+// Public views remove only text already retained in the same response scope.
+// Keep canonical events (including aliased waits) intact for persistence/readers.
+function projectPublicResponse(value) {
+  if (!value || typeof value !== "object") return value;
+  const eventView = (event, texts, fields) => {
+    if (!event) return event;
+    const view = { ...event };
+    for (const field of fields) {
+      if (texts.some((text) => text != null && text === event[field])) delete view[field];
+    }
+    return view;
+  };
+  const waitView = (wait, texts) =>
+    wait
+      ? {
+          ...wait,
+          ...(wait.matched_hook && {
+            matched_hook: eventView(wait.matched_hook, texts, ["answer", "last_assistant_message"]),
+          }),
+        }
+      : wait;
+  const requestView = (request) => {
+    if (!request) return request;
+    const texts = [request.result_text];
+    return {
+      ...request,
+      completion_event: eventView(request.completion_event, texts, ["answer", "last_assistant_message"]),
+      last_wait: waitView(request.last_wait, texts),
+      ...(request.wait && { wait: waitView(request.wait, texts) }),
+    };
+  };
+  const view = { ...value };
+  if (Array.isArray(value.sessions)) view.sessions = value.sessions.map(projectPublicResponse);
+  for (const field of ["request", "last_request", "active_request"]) {
+    if (Object.hasOwn(value, field)) view[field] = requestView(value[field]);
+  }
+  const requestTexts = [value.last_request?.result_text, value.active_request?.result_text];
+  if (value.last_hook_event) {
+    view.last_hook_event = eventView(
+      value.last_hook_event,
+      [value.latest_native_outcome?.answer, ...requestTexts],
+      ["last_assistant_message"],
+    );
+  }
+  if (value.wait) view.wait = waitView(value.wait, requestTexts);
+  return view;
+}
+
 function textResult(value) {
   return {
     content: [
       {
         type: "text",
-        text: typeof value === "string" ? value : JSON.stringify(value, null, 2),
+        text: typeof value === "string" ? value : JSON.stringify(projectPublicResponse(value), null, 2),
       },
     ],
   };
@@ -1442,7 +1490,8 @@ function refreshObserverEvents(session) {
           turn_id: event.turn_id,
           at: event.at,
           reason: event.reason,
-          answer: typeof event.answer === "string" ? event.answer.slice(0, 64000) : null,
+          answer: typeof event.answer === "string" && event.answer.length ? event.answer : null,
+          answer_truncated: event.answer_truncated,
           background_tasks_pending: event.stop?.background_tasks_pending ?? null,
           session_crons_pending: event.stop?.session_crons_pending ?? null,
         };
@@ -2682,7 +2731,7 @@ server.registerTool(
       const effectiveTimeoutMs = effectiveRequestTimeoutMs(activeRequest, timeout_ms);
       const requestText = `${instructionBoundaryForRole(session.role)}
 
-User request:
+Request from the calling Codex agent:
 ${text}`;
       const request = `Codex–Claude Subagent correlation token: ${activeRequest.hook_correlation_token}
 
@@ -2945,7 +2994,7 @@ server.registerTool(
   {
     title: "Read Interactive Claude Code Log",
     description:
-      "Read persisted interactive Claude Code terminal output by byte offset or tail window. Use this to recover long responses that do not fit in output_tail.",
+      "Read best-effort persisted, rendered terminal output by byte offset or tail window. Logs are capped and may or may not contain the remainder of a truncated native answer. eof means the end of the persisted log at read time, not proof of full answer recovery.",
     inputSchema: {
       cwd: z.string().describe("Absolute path to the same target project directory."),
       interactive_id: z.string().min(1).describe("Interactive session id from claude_interactive_start."),

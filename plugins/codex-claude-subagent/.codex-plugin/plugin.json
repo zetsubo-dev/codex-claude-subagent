@@ -1,6 +1,6 @@
 {
   "name": "codex-claude-subagent",
-  "version": "0.4.0+codex.20261110080928848.c65aff",
+  "version": "0.4.1+codex.20261112082534352.c93f6c",
   "description": "Use interactive Claude Code as a role-controlled subagent from Codex via MCP.",
   "license": "MIT",
   "author": {

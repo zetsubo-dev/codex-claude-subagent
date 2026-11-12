@@ -61,6 +61,30 @@ assert.equal(complete.last_api_model, "actual-model");
 assert.equal(complete.answer, "final");
 assert.equal(forwarded, 4, "observer replayed a next handler");
 
+const truncationMarker =
+  "\n[codex-claude-subagent: native answer truncated to at most 64,000 UTF-16 code units; the rest is not in this field and may or may not be in the terminal log]";
+for (const [name, answer, prefix, truncated] of [
+  ["exact-limit", "a".repeat(64000), "a".repeat(64000), false],
+  ["over-limit", "b".repeat(64001), "b".repeat(64000), true],
+  ["surrogate-boundary", "c".repeat(63999) + "🙂suffix", "c".repeat(63999), true],
+  ["non-string", { answer: "not a string" }, "", false],
+  ["empty", "", "", false],
+]) {
+  // Exercise the actual registered hook, not the integration fake's clip copy.
+  const clipping = await harness(name);
+  const event = { turnId: turn, reason: "answer", isAborted: false, answer };
+  const result = { unchanged: name };
+  assert.equal(await clipping.handlers.get("turn.complete")(clipping.api, event, async () => result), result);
+  assert.equal(event.answer, answer, `${name}: input event changed`);
+  assert.equal(clipping.records.length, 1);
+  const record = clipping.records[0];
+  assert.equal(record.answer_truncated, truncated, name);
+  assert.equal(record.answer, prefix + (truncated ? truncationMarker : ""), name);
+  assert(prefix.length <= 64000, `${name}: prefix exceeds limit`);
+  if (name === "surrogate-boundary") assert.equal(prefix.length, 63999);
+  if (truncated) assert(record.answer.includes("at most 64,000 UTF-16 code units"));
+}
+
 const failed = await harness("write-failure", true);
 let calls = 0;
 const original = { original: true };

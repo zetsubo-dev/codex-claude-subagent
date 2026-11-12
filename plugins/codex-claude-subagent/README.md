@@ -217,6 +217,41 @@ observation failure; do not promote Stop, a marker, or silence to success.
 If a record remains incomplete (for example after a disk write failure), stop
 the session and resume its exact Claude UUID after resolving the cause.
 
+## Context and captured answers
+
+Requests preserve the caller-supplied body under
+`Request from the calling Codex agent:`, after the role boundary and before
+the completion protocol. The adapter does not retrieve the user's original
+message. Callers should select relevant verbatim public user excerpts with
+speaker labels in chronological order, including corrections, and keep their
+interpretation and unadopted proposals separate. Do not send the entire
+transcript or hidden reasoning. Labels do not authenticate authorship, and
+quoted instructions do not widen the role boundary.
+
+For an ordinary correlated completion, select `request.result_text`,
+`last_request.result_text`, or `latest_native_outcome.answer` rather than
+echoing the full envelope. Public event views omit duplicate text only when
+an identical canonical text field remains in that request or session scope.
+Distinct diagnostic text, including manual-send failures, stays available.
+These views apply to request/wait, read/list and saved-session responses;
+canonical registry events retain their text for persisted readers.
+
+`result_text_truncated` and session `latest_native_outcome.answer_truncated`
+report partial captured text independently of completion. `null` means no
+answer text was captured in that field. A missing `answer_truncated` on a
+legacy record means unknown, not `false`. Native answer previews retain at
+most 64,000 UTF-16 code units without splitting a surrogate pair, followed by:
+
+```text
+[codex-claude-subagent: native answer truncated to at most 64,000 UTF-16 code units; the rest is not in this field and may or may not be in the terminal log]
+```
+
+`claude_interactive_read_log` exposes best-effort persisted, rendered and
+capped terminal output. It may or may not contain the remainder of a
+truncated native answer. `log_may_be_capped` signals a log at its cap;
+`eof` means the end of the persisted log at read time, not proof of complete
+native answer recovery. Completion and full answer delivery are independent.
+
 ## Requirements
 
 - macOS
