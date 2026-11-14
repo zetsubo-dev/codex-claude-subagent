@@ -1,7 +1,6 @@
 // This observer never changes an event, a model, permissions, or hook results.
 let directory;
 let generation;
-let sessionId;
 let seq = 0;
 let requestToken = null;
 let turnId = null;
@@ -9,49 +8,84 @@ let stop = null;
 let observed = null;
 let writeQueue = Promise.resolve();
 
-async function record($, kind, data) {
-  try {
+function prefix(text, limit) {
+  let end = Math.min(text.length, limit);
+  if (
+    end < text.length &&
+    text.charCodeAt(end - 1) >= 0xd800 &&
+    text.charCodeAt(end - 1) <= 0xdbff &&
+    text.charCodeAt(end) >= 0xdc00 &&
+    text.charCodeAt(end) <= 0xdfff
+  )
+    end -= 1;
+  return text.slice(0, end);
+}
+
+async function record($, kind, data, answer) {
+  const number = ++seq;
+  const identity = (async () => $.session.id())();
+  identity.catch(() => {});
+  const event = {
+    schema: 2,
+    seq: number,
+    request_token: requestToken,
+    turn_id: turnId,
+    kind,
+    at: new Date().toISOString(),
+    ...data,
+  };
+  const write = async () => {
     directory ||= await $.env.get("CODEX_CLAUDE_SUBAGENT_OBSERVER_DIR");
     generation ||= await $.env.get("CODEX_CLAUDE_SUBAGENT_OBSERVER_GENERATION");
-    sessionId ||= await $.session.id();
+    const sessionId = await identity;
     if (!directory || !generation) return;
-    const number = ++seq;
-    const event = {
-      schema: 1,
-      seq: number,
-      generation,
-      session_id: sessionId,
-      request_token: requestToken,
-      turn_id: turnId,
-      kind,
-      at: new Date().toISOString(),
-      ...data,
-    };
-    // One immutable record per event: a partial write cannot overwrite a prior
-    // start or completion. Each completion also contains its own correlation.
-    writeQueue = writeQueue
-      .catch(() => {})
-      .then(() => $.fs.write(directory + "/event-" + String(number).padStart(8, "0") + ".json", JSON.stringify(event)));
+    event.generation = generation;
+    event.session_id = sessionId;
+    if (kind === "turn.complete") {
+      if (typeof answer !== "string") {
+        event.answer_capture = { kind: "invalid", type: typeof answer };
+      } else if (!answer.length) {
+        event.answer_capture = { kind: "empty" };
+      } else {
+        let stage = "encode";
+        try {
+          const bytes = new TextEncoder().encode(answer);
+          const lossless = !/[\ud800-\udfff]/u.test(answer);
+          let sha256 = null;
+          try {
+            const digest = await crypto.subtle.digest("SHA-256", bytes);
+            sha256 = Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, "0")).join("");
+          } catch {}
+          stage = "parts";
+          let parts = 0;
+          for (let offset = 0; offset < answer.length;) {
+            const part = prefix(answer.slice(offset, offset + 262145), 262144);
+            if (++parts > 9999) throw new Error("Answer exceeds the observer part count limit.");
+            await $.fs.write(
+              directory + "/answer-" + String(number).padStart(8, "0") + "-" + String(parts).padStart(4, "0") + ".txt",
+              part,
+            );
+            offset += part.length;
+          }
+          event.answer_capture = { kind: "text", bytes: bytes.length, utf16: answer.length, sha256, parts, lossless };
+        } catch (error) {
+          event.answer_capture = {
+            kind: "capture_failed",
+            stage,
+            error: String(error?.message || error).slice(0, 1000),
+            preview: prefix(answer, 16000),
+          };
+        }
+      }
+    }
+    await $.fs.write(directory + "/event-" + String(number).padStart(8, "0") + ".json", JSON.stringify(event));
+  };
+  try {
+    writeQueue = writeQueue.catch(() => {}).then(write);
     await writeQueue;
   } catch {
     // Recording failure must not alter or replay Claude's processing.
   }
-}
-
-function clip(text) {
-  if (typeof text !== "string") return { text: "", truncated: false };
-  let end = Math.min(text.length, 64000);
-  const code = text.charCodeAt(end - 1);
-  if (code >= 0xd800 && code <= 0xdbff) end -= 1;
-  const truncated = end < text.length;
-  return {
-    text:
-      text.slice(0, end) +
-      (truncated
-        ? "\n[codex-claude-subagent: native answer truncated to at most 64,000 UTF-16 code units; the rest is not in this field and may or may not be in the terminal log]"
-        : ""),
-    truncated,
-  };
 }
 
 export function register(on) {
@@ -65,6 +99,7 @@ export function register(on) {
     return result;
   });
   on("turn.start", async ($, e, next) => {
+    if (e.agentId !== undefined) return next(e);
     requestToken =
       e.text.match(
         /^Codex–Claude Subagent correlation token:\s*(CODEX_CLAUDE_SUBAGENT_REQUEST_[a-z0-9_]+)\s*$/im,
@@ -92,18 +127,20 @@ export function register(on) {
   on("turn.complete", async ($, e, next) => {
     const result = await next(e);
     if (!e.agentId) {
-      const answer = clip(e.answer);
-      await record($, "turn.complete", {
-        turn_id: e.turnId,
-        agent_id: null,
-        reason: e.reason,
-        is_aborted: e.isAborted,
-        answer: answer.text,
-        answer_truncated: answer.truncated,
-        stop,
-        observed,
-        last_api_model: e.usage?.model || null,
-      });
+      await record(
+        $,
+        "turn.complete",
+        {
+          turn_id: e.turnId,
+          agent_id: null,
+          reason: e.reason,
+          is_aborted: e.isAborted,
+          stop,
+          observed,
+          last_api_model: e.usage?.model || null,
+        },
+        e.answer,
+      );
     }
     return result;
   });

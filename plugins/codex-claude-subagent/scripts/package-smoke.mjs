@@ -47,6 +47,16 @@ try {
     );
   }
   process.stdout.write(result.stdout);
+  const answers = spawnSync(process.execPath, ["scripts/answer-delivery.test.mjs", "--package"], {
+    cwd: installedDir,
+    env: { ...process.env, CODEX_CLAUDE_SUBAGENT_TEST_SOURCE: "0" },
+    encoding: "utf8",
+    timeout: 45000,
+  });
+  if (answers.error) throw answers.error;
+  if (answers.status !== 0)
+    throw new Error(`Dependency-free read_answer smoke failed.\n${answers.stdout}\n${answers.stderr}`);
+  process.stdout.write(answers.stdout);
 } finally {
   fs.rmSync(tempRoot, { recursive: true, force: true });
 }

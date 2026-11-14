@@ -95,6 +95,16 @@ Requested model and effort values are passed through to Claude Code. New
 reviews default to Opus when no model is named. Other roles use Claude Code's
 model default, and unspecified effort always uses Claude Code's default.
 
+### Long answers and concurrent sessions
+
+Bounded previews are separate from stored full answers. Codex can read the
+remaining text without sending the request again. See
+[complete-answer reads and their limits](plugins/codex-claude-subagent/README.md#context-and-captured-answers).
+
+Independent sessions can run in parallel across directories or Codex threads
+in the same repository. See [concurrent sessions](plugins/codex-claude-subagent/README.md#concurrent-sessions)
+for session ownership and shared-file boundaries.
+
 If this plugin is useful to you, please consider giving the repository a star.
 It helps others discover the project and supports further development.
 

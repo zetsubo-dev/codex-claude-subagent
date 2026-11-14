@@ -5,13 +5,20 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { reconstruct, hash } from "./fixtures/delivery-fixture.mjs";
 
 if (process.env.CODEX_CLAUDE_SUBAGENT_RUN_LIVE !== "1") {
   throw new Error("Set CODEX_CLAUDE_SUBAGENT_RUN_LIVE=1 to run the subscription-backed Claude Code smoke test.");
 }
 
-const cwd = fs.realpathSync(path.resolve(process.argv.slice(2).find((arg) => arg !== "--") || process.cwd()));
+const liveArgs = process.argv.slice(2).filter((arg) => arg !== "--");
+const effortIndex = liveArgs.indexOf("--effort");
+const effort =
+  effortIndex >= 0 ? liveArgs.splice(effortIndex, 2)[1] : process.env.CODEX_CLAUDE_SUBAGENT_LIVE_EFFORT || "low";
+if (!["low", "medium", "high", "xhigh", "max"].includes(effort)) throw new Error("Invalid live smoke effort.");
+const cwd = fs.realpathSync(path.resolve(liveArgs.find((arg) => !arg.startsWith("--")) || process.cwd()));
 const checkBackground = process.argv.includes("--background");
+const checkDelivery = process.argv.includes("--answer-delivery");
 const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-claude-subagent-live-"));
 const pluginDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const client = new Client({ name: "codex-claude-subagent-live-smoke", version: "0.0.0" });
@@ -43,7 +50,7 @@ try {
       cwd,
       role: "reviewer",
       model: "opus",
-      effort: "low",
+      effort,
       mcp_preset: "none",
       name: "codex-claude-subagent live smoke",
     }),
@@ -65,6 +72,37 @@ try {
   }
   if (reviewed.request.completion_transport !== "claude_code_mod") {
     throw new Error("Live request did not complete through the native lifecycle observer.");
+  }
+  const reviewedBody = await reconstruct({ call: callToolParsed }, cwd, reviewed.request.full_answer);
+  if (reviewedBody !== resultText) throw new Error("Live stored answer differs from its complete inline answer.");
+  let deliveryProof = null;
+  if (checkDelivery) {
+    const answer = parsed(
+      await callTool(
+        "claude_interactive_request",
+        {
+          cwd,
+          interactive_id: started.interactive_id,
+          idle_ms: null,
+          timeout_ms: 600000,
+          text:
+            process.env.CODEX_CLAUDE_SUBAGENT_LIVE_ANSWER_PROMPT ||
+            "Do not use tools. Output 1800 numbered lines. Each line must contain exactly its four-digit line number, a space, then the sentence 日本語🙂abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ. Start immediately at 0001 and end at 1800. Do not abbreviate, summarize or use an ellipsis. This is an exact long-answer transport test. Finish with NATIVE_LONG_TAIL_終.",
+        },
+        660000,
+      ),
+    );
+    if (!answer.request.done || answer.request.completion_transport !== "claude_code_mod")
+      throw new Error("Long live answer did not complete natively.");
+    const body = await reconstruct({ call: callToolParsed }, cwd, answer.request.full_answer);
+    if (body.length <= 64000 || !body.endsWith("NATIVE_LONG_TAIL_終"))
+      throw new Error("Live answer did not meet the >64000-unit tail witness.");
+    deliveryProof = {
+      utf16: body.length,
+      bytes: Buffer.byteLength(body),
+      sha256: hash(body),
+      full_answer: answer.request.full_answer,
+    };
   }
 
   let backgroundProof = null;
@@ -142,13 +180,21 @@ try {
       cwd,
       role: "reviewer",
       model: "opus",
-      effort: "low",
+      effort,
       mcp_preset: "none",
       name: "codex-claude-subagent live resume smoke",
       resume_claude_session_id: started.claude_session_id,
     }),
   );
   liveSessions.push(resumed.interactive_id);
+  const predecessor = await callToolParsed("claude_interactive_read_answer", {
+    cwd,
+    answer_ref: reviewed.request.full_answer.ref,
+  });
+  if (predecessor.origin.interactive_id !== started.interactive_id)
+    throw new Error("Resume changed the predecessor answer origin.");
+  if ((await reconstruct({ call: callToolParsed }, cwd, reviewed.request.full_answer)) !== reviewedBody)
+    throw new Error("Resume orphaned the predecessor answer.");
   const resumedReady = parsed(
     await callTool("claude_interactive_wait", {
       cwd,
@@ -189,6 +235,8 @@ try {
         claude_session_id: started.claude_session_id,
         completion_transport: reviewed.request.completion_transport,
         observed: reviewed.request.observed,
+        requested: { model: "opus", effort },
+        answer_delivery: deliveryProof,
         resumed_round_trip: true,
         background: backgroundProof,
       },
@@ -206,4 +254,8 @@ try {
   }
   await client.close().catch(() => {});
   fs.rmSync(stateDir, { recursive: true, force: true });
+}
+
+async function callToolParsed(name, args) {
+  return parsed(await callTool(name, args));
 }

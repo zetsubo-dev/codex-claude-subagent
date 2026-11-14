@@ -123,7 +123,8 @@ as proof that Codex–Claude Subagent initialized.
 - Use `claude_interactive_read` to inspect recent terminal output.
 - Use `claude_interactive_read_log` to inspect best-effort persisted terminal
   output by byte offset or tail window when `output_tail` is incomplete.
-  The rendered, capped log may or may not contain a truncated answer's remainder.
+  Use `claude_interactive_read_answer`, not the capped log, for a complete
+  stored answer. Follow the full-answer procedure in Interactive Output.
 - Read and read-log can inspect a persisted session owned by another MCP
   server process. Such a result is read-only (`control_available: false`);
   send, wait, and stop must use the owning Codex session.
@@ -260,13 +261,15 @@ turn outcomes are available as session `latest_native_outcome`; they never
 complete another request. While `native_active_turn_id` is set, use read/wait
 or stop instead of sending input. This pre-send check is best-effort, not an
 atomic lock inside Claude Code; no correlation means no claimed completion.
-Prefer `request.result_text` as Claude's captured final answer. Check
-`result_text_truncated` separately from completion state; `null` means no
-answer text was captured in this field. Session `latest_native_outcome.answer`
-has its own `answer_truncated` flag. An absent flag on a legacy record means
-unknown, not `false`. Neither native completion nor `done` proves complete
-answer delivery. Terminal logs provide best-effort audit context. Stop the
-session when no re-review will be sent.
+Prefer `request.result_text` as the answer preview in request/wait-request
+responses. Other session responses use `latest_native_outcome.answer`.
+Check `full_answer` and the preview truncation flag separately from
+completion state. A stored answer has a ref for complete reads; a preview
+alone is not a complete long answer. Neither native completion nor `done`
+proves successful capture or complete delivery. Follow Interactive Output
+before treating an answer as fully read, including when the host clips an
+otherwise untruncated preview. Terminal logs provide
+best-effort audit context. Stop the session when no re-review will be sent.
 
 ## Role Selection
 
@@ -412,28 +415,85 @@ permission requests, and partial text. Always check `wait.reason`, `status`,
 `quiet_ms`, and the returned `output_tail` before deciding whether Claude is
 done, waiting for input, asking for permission, or still running.
 
-For an ordinary correlated completion, the canonical text paths are
-`request.result_text`, `last_request.result_text`, and
-`latest_native_outcome.answer`. Select the relevant field and flags rather than
-echoing the whole envelope. Public event views omit `answer` or
-`last_assistant_message` only when identical text remains in the corresponding
-request or session scope; distinct diagnostics remain, including manual-send
-failures. Canonical persisted events retain their text.
+Request and wait-request responses carry one preview at `request.result_text`.
+Other session responses use `latest_native_outcome.answer`. New
+`last_request`, `active_request`, list, and saved-session views carry
+`full_answer` metadata without body copies. Do not use the removed
+`last_request.result_text` alias for new answers.
 
-Native answer previews keep at most 64,000 UTF-16 code units, avoiding a split
-surrogate pair, followed by this marker when truncated:
+`last_hook_event.answer_ref` replaces Stop text only when the stored native
+answer proves its identical bytes or explicitly truncated prefix is present.
+Distinct diagnostics and legacy text remain. This field is a content
+reference, not completion evidence; continue to use native request status.
 
-```text
-[codex-claude-subagent: native answer truncated to at most 64,000 UTF-16 code units; the rest is not in this field and may or may not be in the terminal log]
-```
+Previews keep at most 64,000 UTF-16 code units without splitting a surrogate
+pair. New previews contain no truncation marker. `result_text_truncated`
+or `answer_truncated` describes the preview only. `null` means no inline
+`result_text` or `answer` text, including a valid empty answer.
 
-`output_tail` is intentionally bounded. `claude_interactive_read_log` reads
-best-effort persisted, rendered and capped terminal output. Start from
-`request.start_log_offset` when available, otherwise use `tail_bytes`, and
-continue from `next_offset` to inspect available pages. Pages preserve UTF-8
-character boundaries. `eof: true` means the end of the persisted log at read
-time; it does not prove complete native answer recovery. The remainder of a
-truncated answer may or may not be in the log; report unavailable text honestly.
+Check `full_answer`:
+
+- `full_answer: null` means no native completion settled this request.
+  Any `result_text` is then hook diagnostic text, not a native answer.
+- `stored` supplies `ref`, `bytes`, `sha256`, and `lossless`.
+- `empty` is a valid empty native answer.
+- `not_captured` or `store_failed` means complete capture is unavailable.
+  Report the error. Do not treat a diagnostic preview as complete or resend
+  the prompt automatically.
+- `legacy` keeps the old stored text, marker, and flags. A missing legacy
+  truncation flag means unknown. Do not claim recovery of lost legacy text.
+
+`answer_read_error` means the stored answer's preview could not be read.
+Keep the `stored` descriptor and ref, call `read_answer`, and report its
+error code. Do not mistake a missing preview for an empty native answer.
+
+To retrieve a stored answer in full, or recover text omitted by the host:
+
+1. Call `claude_interactive_read_answer` with the same `cwd`,
+   `answer_ref: full_answer.ref`, and `offset: 0`.
+2. Append `text` and continue from `next_offset` until `eof` is true.
+   Offsets count UTF-8 bytes. Pages preserve character boundaries and do not
+   strip ANSI-looking text. The default is 200,000 bytes and the maximum is
+   1 MiB by default. The read-size environment settings can change these
+   values; `codex_claude_subagent_info` reports the effective values.
+3. Check contiguous offsets, total byte count, and SHA-256 on raw tool
+   results in code, before printing bounded sections. An end page
+   alone does not prove that earlier pages were read. If `lossless` is false,
+   disclose the encoding change rather than claiming exact native recovery.
+
+The host has its own output budget, and the plugin cannot detect host
+clipping. Plugin truncation flags set to `false` or a page's `eof: true`
+do not prove that all returned text reached the model. If the host omits
+text or shows a truncation marker, treat that section as unread and retrieve
+or display smaller sections. A matching hash proves byte retrieval, not
+that the model read the answer. Expose sections within the host's output
+budget and do not claim to have reviewed content that was not shown.
+
+Reading does not send input to Claude. Keep the ref if later reads are
+needed. It survives stop, MCP restart, and exact-UUID resume until retention
+evicts its registration. Check `origin` to identify the producing session
+and turn. Missing, corrupt, mis-scoped, and invalid-offset reads are errors,
+never an empty successful end page.
+
+For concurrent work across directories or Codex threads in the same
+repository, keep each session's IDs, request IDs, and answer refs together.
+Independent starts use separate conversations. Never substitute a latest
+session chosen by cwd. Exact-UUID resume refuses a second live attachment
+to that UUID, not other conversations in the same repository.
+
+Separate conversations do not isolate files in a shared `cwd`. Codex still
+coordinates concurrent edits and final integration.
+
+A known answer ref may be read from another MCP connection with the correct
+cwd. There is no thread ACL; verify `origin` rather than assuming the reader
+owns the producing session. Shared retention may evict stopped records from
+other threads, never live ones. Report `persist_error` separately from
+native completion and capture.
+
+`output_tail` is bounded. `claude_interactive_read_log` remains a best-effort
+reader for rendered, capped terminal output. Its `eof` means the log's end,
+not complete native answer recovery. Use the answer reader for stored
+answers and report unavailable capture honestly.
 
 When stopping a session, check `stop.exited`. If it is `false`, the stop signal
 was sent but the PTY bridge did not confirm exit within the wait window.

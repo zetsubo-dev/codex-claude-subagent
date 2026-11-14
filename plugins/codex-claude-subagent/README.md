@@ -228,29 +228,100 @@ interpretation and unadopted proposals separate. Do not send the entire
 transcript or hidden reasoning. Labels do not authenticate authorship, and
 quoted instructions do not widen the role boundary.
 
-For an ordinary correlated completion, select `request.result_text`,
-`last_request.result_text`, or `latest_native_outcome.answer` rather than
-echoing the full envelope. Public event views omit duplicate text only when
-an identical canonical text field remains in that request or session scope.
-Distinct diagnostic text, including manual-send failures, stays available.
-These views apply to request/wait, read/list and saved-session responses;
-canonical registry events retain their text for persisted readers.
+Request and wait-request responses put the answer preview in
+`request.result_text`. Other session responses put it in
+`latest_native_outcome.answer`. New responses include the preview once;
+`last_request`, `active_request`, list, and saved-session views carry
+`full_answer` metadata without another copy of the body. Do not depend on
+`last_request.result_text` for new answers.
 
-`result_text_truncated` and session `latest_native_outcome.answer_truncated`
-report partial captured text independently of completion. `null` means no
-answer text was captured in that field. A missing `answer_truncated` on a
-legacy record means unknown, not `false`. Native answer previews retain at
-most 64,000 UTF-16 code units without splitting a surrogate pair, followed by:
+When a stored native answer proves that a Stop notification's text is already
+contained in it, `last_hook_event.answer_ref` replaces that redundant text.
+Distinct diagnostics and legacy text remain available. This reference proves
+content availability, not request completion.
 
-```text
-[codex-claude-subagent: native answer truncated to at most 64,000 UTF-16 code units; the rest is not in this field and may or may not be in the terminal log]
-```
+The preview keeps at most 64,000 UTF-16 code units without splitting a
+surrogate pair. `result_text_truncated` and `answer_truncated` describe that
+preview, not the stored answer. New previews have no truncation marker.
+`result_text: null` or `answer: null` means no inline text, including a
+valid empty answer.
 
-`claude_interactive_read_log` exposes best-effort persisted, rendered and
-capped terminal output. It may or may not contain the remainder of a
-truncated native answer. `log_may_be_capped` signals a log at its cap;
-`eof` means the end of the persisted log at read time, not proof of complete
-native answer recovery. Completion and full answer delivery are independent.
+Check `full_answer` independently of `done`:
+
+- `full_answer: null` means no native completion settled this request.
+  Any `result_text` is then hook diagnostic text, not a native answer.
+- `stored` provides an `answer_ref` through `full_answer.ref`, the UTF-8 byte
+  count, SHA-256, and `lossless` flag. The complete answer is stored outside
+  the lifecycle event and session registry.
+- `empty` means the native answer was an empty string.
+- `not_captured` or `store_failed` reports a capture or storage failure.
+  A diagnostic preview does not replace the missing complete answer. Do not
+  resend the request automatically.
+- `legacy` means the record predates complete-answer storage. Its original
+  text, marker, and flags remain as stored. A missing legacy truncation flag
+  means unknown, not `false`. Lost legacy text cannot be reconstructed.
+
+`answer_read_error` means the stored answer's preview could not be read.
+The descriptor remains `stored`; retain its ref, call `read_answer`, and
+report any read error code. A missing preview is not an empty answer.
+
+To read a stored answer in full, call `claude_interactive_read_answer` with
+the same `cwd` and `answer_ref: full_answer.ref`. Start at `offset: 0`,
+append each page's `text`, and pass its `next_offset` to the next call until
+`eof` is true. Offsets are UTF-8 byte positions. Pages preserve character
+boundaries and do not strip ANSI-looking text. The default page is 200,000
+bytes and the default maximum is 1 MiB. The existing read-size environment
+settings can change these values; `codex_claude_subagent_info` reports the
+effective values. Reading a page never sends input to Claude.
+
+Check contiguous offsets, the concatenated byte count, and SHA-256 against
+`full_answer` on the raw tool results in code, before printing bounded sections.
+`eof` means this page reached the stored answer's end, not that the caller
+read all preceding pages. `lossless: false` means UTF-8 encoding changed
+the native string; report this rather than claiming exact recovery.
+Missing, corrupt, out-of-scope, and invalid-offset reads return errors,
+not an empty successful page. Retain the ref for later reads. It remains
+attributable through `origin` after stop, MCP restart, and exact-UUID
+resume, until its registration is evicted by retention.
+
+The calling host has its own output budget. The plugin cannot detect host
+clipping. Even `result_text_truncated: false`, `answer_truncated: false`, or
+`eof: true` does not prove that the model received all returned text.
+If the host omits text or shows a truncation marker, treat that section as
+unread and retrieve or display smaller sections. A matching hash proves
+byte retrieval, not that the model read every section. Keep each displayed
+section within the host's budget before using it in a review. Codex documents
+its [MCP output budget settings](https://learn.chatgpt.com/docs/extend/mcp#other-configuration-options).
+
+`claude_interactive_read_log` remains a best-effort reader for rendered,
+capped terminal output. Its `eof` describes the log, not the answer.
+Use `read_answer`, not the terminal log, for complete stored answer text.
+Native completion, successful capture, and complete delivery are separate.
+
+## Concurrent sessions
+
+Independent starts create separate Claude conversations and interactive IDs,
+including when Codex threads use the same repository. Separate MCP server
+processes can share the state directory. Session control uses the returned
+IDs, never a latest session selected by project path. Exact-UUID resume
+refuses a second attachment while that same conversation is live; this does
+not prevent independent conversations in the same directory.
+
+Separate conversations do not isolate project files. Concurrent implementers
+with the same `cwd` still write to the same filesystem; Codex coordinates
+those edits and final integration.
+
+Keep each request's IDs and answer ref together. `origin` identifies the
+session and turn that produced a stored answer. A caller with a known ref
+and the correct `cwd` may read it from another MCP connection. There is no
+per-Codex-thread access control. A different `cwd`, a malformed ref, a missing
+answer, or inconsistent stored metadata returns an error rather than
+selecting another session's latest answer.
+
+The retention limits are shared across threads and directories. Activity in
+one session can evict another stopped registration under those limits, but
+never a live registration. A `persist_error` reports a failed or stale-owner
+registry update; it is separate from native completion and answer capture.
 
 ## Requirements
 
@@ -346,6 +417,7 @@ skill are loaded.
   it again.
 - `claude_interactive_send` — send manual follow-up input.
 - `claude_interactive_read` / `claude_interactive_read_log` — inspect output.
+- `claude_interactive_read_answer`. Page a complete stored native answer.
 - `claude_interactive_list` / `claude_interactive_saved_sessions` — inspect live
   and resumable sessions.
 - `claude_interactive_stop` — stop a session.
@@ -362,8 +434,8 @@ Stopping a session keeps it registered for exact-UUID resume; it does not
 immediately archive the conversation. Cleanup keeps live sessions and prunes
 stopped registrations using these defaults: 30 days since the record's last
 update, a 200-record registry limit (including live sessions), and a 512 MiB
-budget for stopped sessions' tracked terminal logs, hook events, settings, and
-context files. Live sessions are
+budget for stopped sessions' tracked terminal logs, hook events, settings,
+context files, stored answers, and remaining observer capture files. Live sessions are
 never evicted to meet these limits.
 
 The limits can be changed with `CODEX_CLAUDE_SUBAGENT_MAX_SAVED_SESSION_AGE_DAYS`,

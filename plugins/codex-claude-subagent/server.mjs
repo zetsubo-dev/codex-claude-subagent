@@ -12,7 +12,9 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import * as z from "zod/v4";
 import { createClaudeAuthPreflight } from "./lib/auth-preflight.mjs";
 import { createSessionRegistrySupport } from "./lib/session-registry.mjs";
-import { readObserverRecords } from "./lib/observer.mjs";
+import { readObserverRecords, readAnswerParts, removeObserverRecord, observerResidualBytes } from "./lib/observer.mjs";
+import { createAnswerStore, AnswerReadError, parseAnswerRef } from "./lib/answer-store.mjs";
+import { safeUtf8Slice } from "./lib/utf8.mjs";
 
 const PLUGIN_DIR = path.dirname(fileURLToPath(import.meta.url));
 const BASE_VERSION = "0.2.0";
@@ -66,14 +68,22 @@ const SUBMIT_CONFIRM_ATTEMPTS = parsePositiveIntegerEnv("CODEX_CLAUDE_SUBAGENT_S
 const STOP_GRACE_MS = 8000;
 const DEFAULT_MAX_LOG_BYTES = 10 * 1024 * 1024;
 const MAX_LOG_BYTES = parsePositiveIntegerEnv("CODEX_CLAUDE_SUBAGENT_MAX_LOG_BYTES", DEFAULT_MAX_LOG_BYTES);
-const MAX_LOG_READ_BYTES = parsePositiveIntegerEnv("CODEX_CLAUDE_SUBAGENT_MAX_LOG_READ_BYTES", 1024 * 1024);
+const MAX_LOG_READ_BYTES = Math.max(
+  4,
+  parsePositiveIntegerEnv("CODEX_CLAUDE_SUBAGENT_MAX_LOG_READ_BYTES", 1024 * 1024),
+);
 const DEFAULT_LOG_READ_BYTES = Math.min(
-  parsePositiveIntegerEnv("CODEX_CLAUDE_SUBAGENT_DEFAULT_LOG_READ_BYTES", 200000),
+  Math.max(4, parsePositiveIntegerEnv("CODEX_CLAUDE_SUBAGENT_DEFAULT_LOG_READ_BYTES", 200000)),
   MAX_LOG_READ_BYTES,
 );
 const MAX_MCP_CONFIG_FILES = parsePositiveIntegerEnv("CODEX_CLAUDE_SUBAGENT_MAX_MCP_CONFIG_FILES", 200);
 const PRIVATE_DIR_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
+const answerStore = createAnswerStore({
+  root: path.join(STATE_DIR, "answers"),
+  fileMode: PRIVATE_FILE_MODE,
+  dirMode: PRIVATE_DIR_MODE,
+});
 const MAX_SAVED_SESSIONS = parsePositiveIntegerEnv("CODEX_CLAUDE_SUBAGENT_MAX_SAVED_SESSIONS", 200);
 const MAX_SAVED_SESSION_BYTES = parsePositiveIntegerEnv(
   "CODEX_CLAUDE_SUBAGENT_MAX_SAVED_SESSION_BYTES",
@@ -378,16 +388,19 @@ function readRegistryMapUnsafe() {
 function removeOwnedArtifact(filePath, directory) {
   if (!filePath || typeof filePath !== "string") return;
   const resolved = path.resolve(filePath);
-  if (!isPathWithin(path.resolve(directory), resolved)) return;
+  if (path.dirname(resolved) !== path.resolve(directory)) return;
   const stat = fs.lstatSync(resolved, { throwIfNoEntry: false });
   if (stat?.isFile() && !stat.isSymbolicLink()) fs.rmSync(resolved, { force: true });
 }
 
-function cleanupSessionArtifacts(record) {
+function cleanupSessionArtifacts(record, retained) {
   removeOwnedArtifact(record.log_path, INTERACTIVE_LOG_DIR);
   removeOwnedArtifact(record.hook_event_path, HOOK_EVENT_DIR);
   removeOwnedArtifact(record.hook_settings_path, HOOK_SETTINGS_DIR);
   removeOwnedArtifact(record.instruction_context_path, INSTRUCTION_CONTEXT_DIR);
+  if (record.answer_store_id && !retained.some((other) => other.answer_store_id === record.answer_store_id)) {
+    answerStore.remove(record.answer_store_id);
+  }
   if (
     record.observer_event_dir &&
     path.dirname(record.observer_event_dir) === OBSERVER_EVENT_DIR &&
@@ -401,7 +414,7 @@ function cleanupSessionArtifacts(record) {
 function sessionArtifactSizeBytes(record) {
   return [record.log_path, record.hook_event_path, record.hook_settings_path, record.instruction_context_path].reduce(
     (total, filePath) => total + fileSizeBytes(filePath),
-    0,
+    (record.answer_store_bytes || 0) + (record.observer_residual_bytes || 0),
   );
 }
 
@@ -414,7 +427,7 @@ function writeRegistryMapUnsafe(registry) {
   fs.renameSync(tmpPath, SESSION_REGISTRY_PATH);
   for (const record of evicted) {
     try {
-      cleanupSessionArtifacts(record);
+      cleanupSessionArtifacts(record, sessions);
     } catch (error) {
       console.error(`Codex–Claude Subagent could not remove evicted session artifacts: ${error.message}`);
     }
@@ -444,6 +457,7 @@ function reconcileRegistryMap(registry) {
       record.ended_at ||= now;
       record.updated_at = now;
       record.error ||= "Codex–Claude Subagent server restarted before this PTY session reached a terminal state.";
+      record.observer_residual_bytes = observerResidualBytes(record.observer_event_dir);
       if (requestIsPending(record.active_request)) {
         record.active_request.status = "interrupted";
         record.active_request.done = false;
@@ -498,11 +512,14 @@ async function reserveSessionLease(record) {
           `Claude Code session ${record.claude_session_id} is already attached to interactive session ${leased.interactive_id}.`,
         );
       }
+      record.answer_store_id = current.get(key)?.answer_store_id ?? key;
+      record.answer_store_bytes = answerStore.sizeOf(record.answer_store_id);
       current.set(key, record);
       return writeRegistryMapUnsafe(current);
     }),
   );
   replaceSavedSessionRegistry(registry);
+  return registry.get(sessionRegistryKey(record));
 }
 
 async function requireSavedResumeRecord(claudeSessionId, cwd, role) {
@@ -547,22 +564,37 @@ function persistInteractiveSession(session) {
     hook_settings_path: session.hook_settings_path,
     instruction_context_path: session.instruction_context_path,
     observer_event_dir: session.observer_event_dir,
+    answer_store_id: session.answer_store_id,
+    answer_store_bytes: session.answer_store_bytes || 0,
+    observer_residual_bytes: session.observer_residual_bytes || 0,
     native_active_turn_id: session.native_active_turn_id || null,
     native_active_since: session.native_active_since || null,
-    latest_native_outcome: session.latest_native_outcome || null,
+    latest_native_outcome: persistedAnswerView(session.latest_native_outcome),
     hooks_active: session.hooks_active,
     last_hook_event: session.last_hook_event,
-    active_request: compactRequest(session.active_request),
-    last_request: compactRequest(session.last_request),
+    active_request: persistedAnswerView(compactRequest(session.active_request)),
+    last_request: persistedAnswerView(compactRequest(session.last_request)),
   };
   const key = sessionRegistryKey(record);
   if (!key) return;
   const previousKey = session.registry_key;
   session.registry_key = key;
-  return queueRegistryOperation(() =>
+  const queued = queueRegistryOperation(() =>
     withRegistryLock(() => {
       let current = readRegistryMapUnsafe();
       reconcileRegistryMap(current);
+      const existing = current.get(key);
+      if (
+        existing &&
+        existing.interactive_id !== record.interactive_id &&
+        (!LIVE_SESSION_STATUSES.has(record.status) ||
+          (LIVE_SESSION_STATUSES.has(existing.status) && processIsAlive(existing.owner_pid)))
+      ) {
+        throw Object.assign(
+          new Error("A newer or live attachment owns this Claude session; this stale attachment was not persisted."),
+          { code: "stale_attachment" },
+        );
+      }
       if (previousKey && previousKey !== key) {
         const previous = current.get(previousKey);
         if (previous?.owner_instance_id === INSTANCE_ID) current.delete(previousKey);
@@ -573,11 +605,52 @@ function persistInteractiveSession(session) {
       return registry;
     }),
   );
+  session.persist_promise = queued.then(
+    () => {
+      session.persist_error = null;
+      return null;
+    },
+    (error) => {
+      session.persist_error = { code: error.code || "io_error", message: error.message };
+      return null;
+    },
+  );
+  return session.persist_promise;
 }
 
-// Public views remove only text already retained in the same response scope.
-// Keep canonical events (including aliased waits) intact for persistence/readers.
-function projectPublicResponse(value) {
+function persistedAnswerView(value) {
+  if (!value) return null;
+  if (!Object.hasOwn(value, "full_answer")) return value;
+  const view = { ...value };
+  if (view.full_answer) {
+    const { preview: _preview, ...descriptor } = view.full_answer;
+    view.full_answer = descriptor;
+  }
+  delete view.result_text;
+  delete view.result_text_truncated;
+  delete view.provisional_result_text;
+  return view;
+}
+
+function renderAnswer(fullAnswer) {
+  if (!fullAnswer) return { full_answer: null, text: null, truncated: false };
+  const { preview, ...descriptor } = fullAnswer;
+  if (descriptor.status === "stored") {
+    try {
+      return { full_answer: descriptor, ...answerStore.preview(descriptor.ref, 64000) };
+    } catch (error) {
+      return {
+        full_answer: descriptor,
+        text: null,
+        truncated: true,
+        answer_read_error: { code: error.code || "io_error", message: error.message },
+      };
+    }
+  }
+  return { full_answer: descriptor, text: preview || null, truncated: Boolean(preview) };
+}
+
+function projectPublicResponse(value, { includeAnswer = true } = {}) {
   if (!value || typeof value !== "object") return value;
   const eventView = (event, texts, fields) => {
     if (!event) return event;
@@ -607,15 +680,62 @@ function projectPublicResponse(value) {
     };
   };
   const view = { ...value };
-  if (Array.isArray(value.sessions)) view.sessions = value.sessions.map(projectPublicResponse);
+  if (Array.isArray(value.sessions))
+    view.sessions = value.sessions.map((session) => projectPublicResponse(session, { includeAnswer: false }));
   for (const field of ["request", "last_request", "active_request"]) {
-    if (Object.hasOwn(value, field)) view[field] = requestView(value[field]);
+    if (Object.hasOwn(value, field)) {
+      const request = requestView(value[field]);
+      if (request) {
+        if (!Object.hasOwn(request, "full_answer")) {
+          request.full_answer = { status: "legacy" };
+        } else {
+          const { preview: _preview, ...descriptor } = request.full_answer || {};
+          request.full_answer = value[field].full_answer ? descriptor : null;
+          if (field === "request" && includeAnswer && request.full_answer) {
+            const answer = renderAnswer(value[field].full_answer);
+            request.full_answer = answer.full_answer;
+            if (request.provisional_answer) request.provisional_result_text = answer.text;
+            else request.result_text = answer.text;
+            request.result_text_truncated = Boolean(answer.truncated);
+            if (answer.answer_read_error) request.answer_read_error = answer.answer_read_error;
+          } else if (request.full_answer) {
+            delete request.result_text;
+            delete request.result_text_truncated;
+            delete request.provisional_result_text;
+          }
+        }
+      }
+      view[field] = request;
+    }
+  }
+  if (value.latest_native_outcome) {
+    const outcome = { ...value.latest_native_outcome };
+    if (!Object.hasOwn(outcome, "full_answer")) {
+      outcome.full_answer = { status: "legacy" };
+    } else if (includeAnswer && !value.request) {
+      const answer = renderAnswer(outcome.full_answer);
+      outcome.full_answer = answer.full_answer;
+      outcome.answer = answer.text;
+      outcome.answer_truncated = Boolean(answer.truncated);
+      if (answer.answer_read_error) outcome.answer_read_error = answer.answer_read_error;
+    } else {
+      const { preview: _preview, ...descriptor } = outcome.full_answer || {};
+      outcome.full_answer = outcome.full_answer ? descriptor : null;
+      delete outcome.answer;
+      delete outcome.answer_truncated;
+    }
+    view.latest_native_outcome = outcome;
   }
   const requestTexts = [value.last_request?.result_text, value.active_request?.result_text];
   if (value.last_hook_event) {
     view.last_hook_event = eventView(
       value.last_hook_event,
-      [value.latest_native_outcome?.answer, ...requestTexts],
+      [
+        view.latest_native_outcome?.answer,
+        view.request?.result_text,
+        view.request?.provisional_result_text,
+        ...requestTexts,
+      ],
       ["last_assistant_message"],
     );
   }
@@ -1217,34 +1337,6 @@ function createBoundedLogWriter(filePath) {
   };
 }
 
-function utf8SequenceLength(byte) {
-  if ((byte & 0x80) === 0) return 1;
-  if ((byte & 0xe0) === 0xc0) return 2;
-  if ((byte & 0xf0) === 0xe0) return 3;
-  if ((byte & 0xf8) === 0xf0) return 4;
-  return 1;
-}
-
-function safeUtf8Slice(buffer, maxBytes) {
-  let start = 0;
-  while (start < buffer.length && (buffer[start] & 0xc0) === 0x80) start += 1;
-  if (start >= buffer.length) return { start, end: start };
-  const available = buffer.length - start;
-  let end = start + Math.min(maxBytes, available);
-  while (end > start) {
-    let lead = end - 1;
-    while (lead > start && (buffer[lead] & 0xc0) === 0x80) lead -= 1;
-    const sequenceLength = utf8SequenceLength(buffer[lead]);
-    if (lead + sequenceLength <= end) break;
-    end = lead;
-  }
-  if (end === start) {
-    const firstLength = utf8SequenceLength(buffer[start]);
-    if (firstLength <= maxBytes && start + firstLength <= buffer.length) end = start + firstLength;
-  }
-  return { start, end };
-}
-
 function readInteractiveLog(session, { offset = 0, maxBytes = null, tailBytes = null, strip = true } = {}) {
   const logSizeBytes = fileSizeBytes(session.log_path);
   const effectiveWindowBytes = tailBytes === null ? null : Math.min(tailBytes, MAX_LOG_READ_BYTES, logSizeBytes);
@@ -1352,6 +1444,8 @@ function compactRequest(request, { includePermissionAttention = false } = {}) {
     background_tasks_pending: request.background_tasks_pending ?? null,
     session_crons_pending: request.session_crons_pending ?? null,
     provisional_result_text: request.provisional_result_text || null,
+    ...(Object.hasOwn(request, "full_answer") && { full_answer: request.full_answer }),
+    ...(request.provisional_answer && { provisional_answer: true }),
     completion_marker: request.completion_marker,
     marker_seen: request.marker_seen,
     start_seq: request.start_seq,
@@ -1365,8 +1459,12 @@ function compactRequest(request, { includePermissionAttention = false } = {}) {
     completed_at: request.completed_at,
     last_wait: request.last_wait,
     completion_event: request.completion_event,
-    result_text: request.completion_event?.last_assistant_message || null,
-    result_text_truncated: Boolean(request.completion_event?.last_assistant_message_truncated),
+    result_text: request.completion_event?.last_assistant_message || request.result_text || null,
+    ...(typeof request.completion_event?.last_assistant_message_truncated === "boolean"
+      ? { result_text_truncated: request.completion_event.last_assistant_message_truncated }
+      : typeof request.result_text_truncated === "boolean"
+        ? { result_text_truncated: request.result_text_truncated }
+        : {}),
     last_notification: request.last_notification,
     pending,
     long_running: Boolean(pending && waitPolicy.long_running),
@@ -1428,7 +1526,7 @@ function permissionAttentionKey(event) {
 function finalizeRequest(
   session,
   request,
-  { status, terminalState, markerSeen = request.marker_seen || false, event = null },
+  { status, terminalState, markerSeen = request.marker_seen || false, event = null, persist = true },
 ) {
   const now = new Date().toISOString();
   markerSeen ||= interactiveTextSince(session, request.start_seq).includes(request.completion_marker);
@@ -1452,7 +1550,154 @@ function finalizeRequest(
   session.last_request = request;
   if (session.active_request?.request_id === request.request_id) session.active_request = null;
   session.updated_at = now;
-  persistInteractiveSession(session);
+  if (persist) persistInteractiveSession(session);
+}
+
+function settleNativeCompletion(session, event) {
+  const request = session.active_request;
+  const correlated =
+    request &&
+    event.request_token === request.hook_correlation_token &&
+    (!request.native_turn_id || request.native_turn_id === event.turn_id);
+  const capture = event.answer_capture;
+  let fullAnswer;
+  if (capture?.kind === "empty") {
+    fullAnswer = { status: "empty" };
+  } else if (capture?.kind === "invalid") {
+    fullAnswer = { status: "not_captured", reason: "invalid_type", detail: capture.type };
+  } else if (capture?.kind === "text") {
+    let body;
+    try {
+      body = readAnswerParts(session.observer_event_dir, event.seq, capture.parts);
+    } catch (error) {
+      fullAnswer = { status: "not_captured", reason: "integrity_mismatch", detail: error.message };
+    }
+    if (body) {
+      try {
+        fullAnswer = answerStore.ingest({
+          storeId: session.answer_store_id,
+          generation: session.observer_generation,
+          seq: event.seq,
+          body,
+          expect: capture,
+          origin: {
+            interactive_id: session.interactive_id,
+            claude_session_id: event.session_id,
+            request_id: correlated ? request.request_id : null,
+            turn_id: event.turn_id,
+            at: event.at,
+          },
+        });
+      } catch (error) {
+        const { end } = safeUtf8Slice(body, 48000);
+        const text = body.subarray(0, end).toString("utf8");
+        let previewEnd = Math.min(text.length, 16000);
+        if (previewEnd < text.length && /[\ud800-\udbff]/.test(text[previewEnd - 1])) previewEnd -= 1;
+        fullAnswer = {
+          status: "store_failed",
+          error: { code: error.code || "io_error", message: error.message },
+          preview: text.slice(0, previewEnd),
+        };
+      }
+      if (fullAnswer.status === "stored") {
+        const hook = session.last_hook_event;
+        if (hook?.hook_event_name === "Stop" && typeof hook.last_assistant_message === "string") {
+          const text = hook.last_assistant_message;
+          const truncated = hook.last_assistant_message_truncated === true;
+          const marker = "\n[codex-claude-subagent: hook field truncated]";
+          if (!truncated || text.endsWith(marker)) {
+            const hookBody = Buffer.from(truncated ? text.slice(0, -marker.length) : text, "utf8");
+            const matches = truncated
+              ? hookBody.length < body.length && body.subarray(0, hookBody.length).equals(hookBody)
+              : hookBody.length === body.length && body.equals(hookBody);
+            if (matches) {
+              delete hook.last_assistant_message;
+              hook.answer_ref = fullAnswer.ref;
+            }
+          }
+        }
+        try {
+          session.answer_store_bytes = answerStore.sizeOf(session.answer_store_id);
+        } catch (error) {
+          console.error(`Codex–Claude Subagent could not update answer store size: ${error.message}`);
+        }
+      }
+    }
+  } else {
+    fullAnswer = {
+      status: "not_captured",
+      reason: "observer_write_failed",
+      detail: capture?.error || "The native completion has no valid answer capture.",
+      ...(typeof capture?.preview === "string" && { preview: capture.preview }),
+    };
+  }
+  if (session.native_active_turn_id === event.turn_id) {
+    session.native_active_turn_id = null;
+    session.native_active_since = null;
+  }
+  session.latest_native_outcome = {
+    turn_id: event.turn_id,
+    at: event.at,
+    reason: event.reason,
+    full_answer: fullAnswer,
+    background_tasks_pending: event.stop?.background_tasks_pending ?? null,
+    session_crons_pending: event.stop?.session_crons_pending ?? null,
+  };
+  if (!session.native_active_turn_id) session.observer_uncertain = false;
+  if (correlated) {
+    request.native_turn_id = event.turn_id;
+    request.full_answer = fullAnswer;
+    request.marker_seen ||= interactiveTextSince(session, request.start_seq).includes(request.completion_marker);
+    const stop = event.stop || request.stop_candidate;
+    request.background_tasks_pending = stop?.background_tasks_pending ?? null;
+    request.session_crons_pending = stop?.session_crons_pending ?? null;
+    request.stop_block_overridden = typeof event.stop?.blocked === "boolean" ? event.stop.blocked : null;
+    request.observed = {
+      model: typeof event.observed?.model === "string" ? event.observed.model : null,
+      effort: typeof event.observed?.effort === "string" ? event.observed.effort : null,
+      last_api_model: event.last_api_model || null,
+      source: "claude_code_mod",
+      note: "turn.step observation; downstream mods or model limits may change effort",
+      effort_matches_request:
+        session.resolved.requested_effort && event.observed?.effort != null
+          ? session.resolved.requested_effort === event.observed.effort
+          : null,
+    };
+    session.resolved.observed = request.observed;
+    const { answer_capture: _capture, ...metadata } = event;
+    const completion = { ...metadata, hook_event_name: "turn.complete" };
+    request.completion_confirmation = "native_turn_complete";
+    if (event.is_aborted || event.reason === "aborted" || stop?.prevent_continuation) {
+      finalizeRequest(session, request, {
+        status: "interrupted",
+        terminalState: "native_turn_aborted",
+        event: completion,
+        persist: false,
+      });
+    } else if (["error", "refusal"].includes(event.reason)) {
+      finalizeRequest(session, request, {
+        status: "failed",
+        terminalState: `native_turn_${event.reason}`,
+        event: completion,
+        persist: false,
+      });
+    } else if (event.reason === "answer") {
+      finalizeRequest(session, request, {
+        status: "completed",
+        terminalState: "completed_with_native_event",
+        event: completion,
+        persist: false,
+      });
+    } else {
+      request.provisional_answer = true;
+      request.attention_required = {
+        reason: "completion_unconfirmed",
+        instruction:
+          "An unknown native completion reason was observed. Read the session or stop it; do not resend the request.",
+      };
+    }
+  }
+  return fullAnswer.status !== "store_failed" && fullAnswer.reason !== "integrity_mismatch";
 }
 
 function refreshObserverEvents(session) {
@@ -1470,7 +1715,8 @@ function refreshObserverEvents(session) {
     ].slice(-64);
     session.observer_uncertain = true;
   }
-  for (const { event, file } of records) {
+  for (const { event } of records) {
+    let remove = true;
     if (event.kind === "ready") {
       session.observer_ready = true;
       session.observer_version = event.version;
@@ -1482,20 +1728,7 @@ function refreshObserverEvents(session) {
         session.native_active_since = event.at;
         session.observer_uncertain = false;
       } else if (event.kind === "turn.complete" && typeof event.turn_id === "string") {
-        if (session.native_active_turn_id === event.turn_id) {
-          session.native_active_turn_id = null;
-          session.native_active_since = null;
-        }
-        session.latest_native_outcome = {
-          turn_id: event.turn_id,
-          at: event.at,
-          reason: event.reason,
-          answer: typeof event.answer === "string" && event.answer.length ? event.answer : null,
-          answer_truncated: event.answer_truncated,
-          background_tasks_pending: event.stop?.background_tasks_pending ?? null,
-          session_crons_pending: event.stop?.session_crons_pending ?? null,
-        };
-        if (!session.native_active_turn_id) session.observer_uncertain = false;
+        remove = settleNativeCompletion(session, event);
       }
       const request = session.active_request;
       if (request && event.request_token === request.hook_correlation_token && !event.agent_id) {
@@ -1503,74 +1736,12 @@ function refreshObserverEvents(session) {
           request.native_turn_id = event.turn_id;
           request.submitted_at ||= event.at;
           request.status = "working";
-        } else if (
-          event.kind === "turn.complete" &&
-          typeof event.turn_id === "string" &&
-          (!request.native_turn_id || request.native_turn_id === event.turn_id)
-        ) {
-          request.native_turn_id = event.turn_id;
-          request.marker_seen ||= interactiveTextSince(session, request.start_seq).includes(request.completion_marker);
-          if (typeof event.answer !== "string" || typeof event.is_aborted !== "boolean") {
-            session.observer_seq = event.seq;
-            fs.rmSync(file, { force: true });
-            continue;
-          }
-          const stop = event.stop || request.stop_candidate;
-          request.background_tasks_pending =
-            event.stop?.background_tasks_pending ?? request.stop_candidate?.background_tasks_pending ?? null;
-          request.session_crons_pending =
-            event.stop?.session_crons_pending ?? request.stop_candidate?.session_crons_pending ?? null;
-          request.stop_block_overridden = typeof event.stop?.blocked === "boolean" ? event.stop.blocked : null;
-          request.observed = {
-            model: typeof event.observed?.model === "string" ? event.observed.model : null,
-            effort: typeof event.observed?.effort === "string" ? event.observed.effort : null,
-            last_api_model: event.last_api_model || null,
-            source: "claude_code_mod",
-            note: "turn.step observation; downstream mods or model limits may change effort",
-            effort_matches_request:
-              session.resolved.requested_effort && event.observed?.effort != null
-                ? session.resolved.requested_effort === event.observed.effort
-                : null,
-          };
-          session.resolved.observed = request.observed;
-          const completion = {
-            ...event,
-            hook_event_name: "turn.complete",
-            last_assistant_message: event.answer || null,
-            last_assistant_message_truncated: Boolean(event.answer_truncated),
-          };
-          request.completion_confirmation = "native_turn_complete";
-          if (event.is_aborted || event.reason === "aborted" || stop?.prevent_continuation) {
-            finalizeRequest(session, request, {
-              status: "interrupted",
-              terminalState: "native_turn_aborted",
-              event: completion,
-            });
-          } else if (["error", "refusal"].includes(event.reason)) {
-            finalizeRequest(session, request, {
-              status: "failed",
-              terminalState: `native_turn_${event.reason}`,
-              event: completion,
-            });
-          } else if (event.reason === "answer") {
-            finalizeRequest(session, request, {
-              status: "completed",
-              terminalState: "completed_with_native_event",
-              event: completion,
-            });
-          } else {
-            request.provisional_result_text = event.answer || null;
-            request.attention_required = {
-              reason: "completion_unconfirmed",
-              instruction:
-                "An unknown native completion reason was observed. Read the session or stop it; do not resend the request.",
-            };
-          }
         }
       }
     }
+    if (remove) removeObserverRecord(session.observer_event_dir, event.seq);
     session.observer_seq = event.seq;
-    fs.rmSync(file, { force: true });
+    session.observer_residual_bytes = observerResidualBytes(session.observer_event_dir);
     persistInteractiveSession(session);
   }
 }
@@ -1752,8 +1923,7 @@ function signalChild(child, signal) {
 }
 
 function waitForSessionExit(session, timeoutMs = STOP_GRACE_MS) {
-  if (session.status !== "running" && session.status !== "stopping") return Promise.resolve(true);
-  if (session.process.exitCode !== null || session.process.signalCode !== null) return Promise.resolve(true);
+  if (session.close_persist) return Promise.resolve(true);
   return new Promise((resolve) => {
     const cleanup = () => {
       clearTimeout(timer);
@@ -1780,6 +1950,7 @@ async function stopInteractiveSession(session, { signal = "SIGTERM", waitMs = ST
     persistInteractiveSession(session);
   }
   const exited = await waitForSessionExit(session, waitMs);
+  if (exited) await (session.close_persist || session.persist_promise);
   return { signaled, exited };
 }
 
@@ -1845,6 +2016,7 @@ function compactInteractiveSession(
     exit_code: session.exit_code,
     signal: session.signal,
     error: session.error,
+    persist_error: session.persist_error || null,
     native_active_turn_id: session.native_active_turn_id || null,
     native_active_since: session.native_active_since || null,
     latest_native_outcome: session.latest_native_outcome || null,
@@ -2292,6 +2464,7 @@ function beginInteractiveRequest(session, completionMarker) {
     completed_at: null,
     last_wait: null,
     completion_event: null,
+    full_answer: null,
     last_notification: null,
     permission_attention: null,
     permission_attention_cleared_key: null,
@@ -2400,7 +2573,7 @@ async function startInteractiveClaude(rawInput) {
   const { args, resolved } = buildInteractiveArgs(input, hookRuntime);
   resolved.auth = claudeAuthPreflight.compactClaudeAuth(claudeAuth);
   const startedAt = new Date().toISOString();
-  await reserveSessionLease({
+  const lease = await reserveSessionLease({
     interactive_id: interactiveId,
     claude_session_id: resolved.claude_session_id,
     resume_mode: resolved.resume_mode,
@@ -2418,6 +2591,7 @@ async function startInteractiveClaude(rawInput) {
     hook_event_path: hookRuntime.eventPath,
     hook_settings_path: hookRuntime.settingsPath,
     instruction_context_path: hookRuntime.instructionContextPath,
+    observer_event_dir: hookRuntime.observerEventDir,
   });
   const env = buildClaudeEnvironment();
   env.CODEX_CLAUDE_SUBAGENT_OBSERVER_DIR = hookRuntime.observerEventDir;
@@ -2434,6 +2608,8 @@ async function startInteractiveClaude(rawInput) {
   const logStream = createBoundedLogWriter(logPath);
   const session = {
     interactive_id: interactiveId,
+    answer_store_id: lease.answer_store_id,
+    answer_store_bytes: lease.answer_store_bytes,
     claude_session_id: resolved.claude_session_id,
     resume_mode: resolved.resume_mode,
     role: input.role,
@@ -2545,7 +2721,8 @@ async function startInteractiveClaude(rawInput) {
     session.ended_at = now;
     session.updated_at = now;
     session.logStream.end();
-    persistInteractiveSession(session);
+    session.observer_residual_bytes = observerResidualBytes(session.observer_event_dir);
+    session.close_persist = persistInteractiveSession(session);
     pruneInteractiveSessions();
   });
 
@@ -2674,6 +2851,7 @@ server.registerTool(
       const submitConfirm = submit
         ? await confirmInteractiveSubmit(session, sinceSeq, { hookSinceOffset: hookStartOffset })
         : null;
+      await session.persist_promise;
       return textResult({
         ...compactInteractiveSession(session, { includeOutput: true, strip: true, sinceSeq }),
         submit: submitConfirm,
@@ -2689,7 +2867,7 @@ server.registerTool(
   {
     title: "Request Interactive Claude Code",
     description:
-      "Submit one correlated main turn for the user-requested Claude task and wait for native turn.complete or StopFailure. Review-only requests do not authorize fixes or a fix/re-review loop. done means main-turn completion, not acceptance of all work; inspect work_pending/count_unknown. Markers and silence never prove completion. Idle and timeout remain resumable by request id.",
+      "Submit one correlated main turn for the user-requested Claude task and wait for native turn.complete or StopFailure. Review-only requests do not authorize fixes or a fix/re-review loop. done means main-turn completion, not acceptance of all work; inspect work_pending/count_unknown. Markers and silence never prove completion. Idle and timeout remain resumable by request id. result_text is a bounded preview, and full_answer.ref is read with claude_interactive_read_answer.",
     inputSchema: {
       cwd: z.string().describe("Absolute path to the same target project directory."),
       interactive_id: z.string().min(1).describe("Interactive session id from claude_interactive_start."),
@@ -2759,6 +2937,7 @@ Completion protocol:
         timeoutMs: effectiveTimeoutMs,
         strip: strip_ansi,
       });
+      await session.persist_promise;
       const requestState = compactRequest(activeRequest, { includePermissionAttention: true });
       return textResult({
         ...compactInteractiveSession(session, {
@@ -2794,7 +2973,7 @@ server.registerTool(
   {
     title: "Wait For Interactive Claude Code Request",
     description:
-      "Continue waiting for a previously submitted Claude Code request by request id. Use after an idle or timeout return instead of sending a second request.",
+      "Continue waiting for a previously submitted Claude Code request by request id. Use after an idle or timeout return instead of sending a second request. result_text is a bounded preview, and full_answer.ref is read with claude_interactive_read_answer.",
     inputSchema: {
       cwd: z.string().describe("Absolute path to the same target project directory."),
       interactive_id: z.string().min(1).describe("Interactive session id from claude_interactive_start."),
@@ -2866,6 +3045,7 @@ server.registerTool(
       timeoutMs: effectiveTimeoutMs,
       strip: strip_ansi,
     });
+    await session.persist_promise;
     return textResult({
       ...compactInteractiveSession(session, {
         includeOutput: true,
@@ -2927,6 +3107,7 @@ server.registerTool(
       timeoutMs: timeout_ms,
       strip: strip_ansi,
     });
+    await session.persist_promise;
     return textResult({
       ...compactInteractiveSession(session, {
         includeOutput: true,
@@ -2968,6 +3149,7 @@ server.registerTool(
     if (interactiveSessions.has(interactive_id)) {
       refreshHookEvents(session);
       refreshObserverEvents(session);
+      await session.persist_promise;
       return textResult(
         compactInteractiveSession(session, {
           includeOutput: true,
@@ -2990,11 +3172,50 @@ server.registerTool(
 );
 
 server.registerTool(
+  "claude_interactive_read_answer",
+  {
+    title: "Read Complete Claude Code Answer",
+    description:
+      "Read an immutable captured answer by UTF-8 byte offset. Use full_answer.ref from a native outcome or request. Concatenate pages from zero and verify total_bytes and sha256 for complete delivery.",
+    inputSchema: {
+      cwd: z.string().describe("Absolute project directory that owns the answer's registered session."),
+      answer_ref: z.string().describe("Immutable full_answer.ref. Not a filesystem path."),
+      offset: z.number().int().nonnegative().default(0),
+      max_bytes: z.number().int().min(4).max(MAX_LOG_READ_BYTES).default(DEFAULT_LOG_READ_BYTES),
+    },
+  },
+  async ({ cwd, answer_ref, offset, max_bytes }) => {
+    try {
+      const { storeId } = parseAnswerRef(answer_ref);
+      const canonicalCwd = requireAbsoluteExistingDirectory(cwd);
+      const localOwner = [...interactiveSessions.values()].find(
+        (session) => session.answer_store_id === storeId && LIVE_SESSION_STATUSES.has(session.status),
+      );
+      if (!localOwner) await loadSessionRegistry();
+      return textResult(
+        answerStore.read(answer_ref, { offset, maxBytes: max_bytes }, (id) => {
+          const owners = localOwner
+            ? [localOwner]
+            : [...savedSessionRegistry.values()].filter((record) => record.answer_store_id === id);
+          if (!owners.length)
+            throw new AnswerReadError("session_not_registered", "The answer's session is not registered.");
+          if (!owners.some((record) => record.cwd === canonicalCwd))
+            throw new AnswerReadError("not_in_scope", "The answer belongs to a different cwd.");
+          return true;
+        }),
+      );
+    } catch (error) {
+      return { ...textResult({ code: error.code || "io_error", message: error.message }), isError: true };
+    }
+  },
+);
+
+server.registerTool(
   "claude_interactive_read_log",
   {
     title: "Read Interactive Claude Code Log",
     description:
-      "Read best-effort persisted, rendered terminal output by byte offset or tail window. Logs are capped and may or may not contain the remainder of a truncated native answer. eof means the end of the persisted log at read time, not proof of full answer recovery.",
+      "Read best-effort persisted, rendered terminal output by byte offset or tail window. Logs are capped terminal output. Use claude_interactive_read_answer with full_answer.ref for a complete stored answer. eof means the end of the persisted log at read time, not proof of full answer recovery.",
     inputSchema: {
       cwd: z.string().describe("Absolute path to the same target project directory."),
       interactive_id: z.string().min(1).describe("Interactive session id from claude_interactive_start."),
@@ -3198,6 +3419,7 @@ server.registerTool(
         "claude_interactive_wait",
         "claude_interactive_read",
         "claude_interactive_read_log",
+        "claude_interactive_read_answer",
         "claude_interactive_list",
         "claude_interactive_saved_sessions",
         "claude_interactive_stop",

@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { deepStrictEqual } from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import vm from "node:vm";
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-claude-subagent-test-"));
 const stateDir = path.join(tmpRoot, "state");
@@ -182,37 +182,57 @@ function runHook(eventName, extra) {
   }
   return results;
 }
-let nativeSeq = 0;
 let nativeToken = null;
 let nativeTurnId = null;
+const nativeObserver = import(${JSON.stringify(new URL("./fixtures/observer-fixture.mjs", import.meta.url).href)}).then(({ createObserverFixture }) => createObserverFixture({
+  directory: process.env.CODEX_CLAUDE_SUBAGENT_OBSERVER_DIR,
+  generation: process.env.CODEX_CLAUDE_SUBAGENT_OBSERVER_GENERATION,
+  sessionId: fakeSessionId,
+}));
+let nativeQueue = nativeObserver;
 if (process.env.FAKE_CLAUDE_OBSERVER_META) fs.writeFileSync(process.env.FAKE_CLAUDE_OBSERVER_META, JSON.stringify({
   directory: process.env.CODEX_CLAUDE_SUBAGENT_OBSERVER_DIR, generation: process.env.CODEX_CLAUDE_SUBAGENT_OBSERVER_GENERATION, session_id: fakeSessionId,
 }));
 function nativeEvent(kind, extra = {}) {
-  const dir = process.env.CODEX_CLAUDE_SUBAGENT_OBSERVER_DIR;
-  if (!dir || process.env.FAKE_CLAUDE_SKIP_OBSERVER === "1") return;
-  const seq = ++nativeSeq;
-  const event = { schema: 1, seq, generation: process.env.CODEX_CLAUDE_SUBAGENT_OBSERVER_GENERATION,
-    session_id: fakeSessionId, request_token: nativeToken, turn_id: nativeTurnId,
-    kind, at: new Date().toISOString(), ...extra };
-  fs.writeFileSync(dir + "/event-" + String(seq).padStart(8,"0") + ".json", JSON.stringify(event));
+  if (process.env.FAKE_CLAUDE_SKIP_OBSERVER === "1") return;
+  const token = nativeToken;
+  const turnId = nativeTurnId;
+  nativeQueue = nativeQueue.then(async (observer) => {
+    if (kind === "ready") await observer.call("session.start");
+    if (kind === "turn.start") {
+      await observer.call("turn.start", { text: token ? "Codex–Claude Subagent correlation token: " + token : "manual", turnId });
+      await observer.observe();
+    }
+    return observer;
+  });
 }
 function nativeComplete(extra) {
-  const raw = process.env.FAKE_CLAUDE_NATIVE_EMPTY === "1" ? "" : String(extra.last_assistant_message || "");
-  let answer = raw.slice(0, 64000);
-  const code = answer.charCodeAt(answer.length - 1);
-  if (code >= 0xd800 && code <= 0xdbff) answer = answer.slice(0,-1);
-  if (answer.length < raw.length) answer += "\\n[codex-claude-subagent: native answer truncated to at most 64,000 UTF-16 code units; the rest is not in this field and may or may not be in the terminal log]";
+  if (process.env.FAKE_CLAUDE_SKIP_OBSERVER === "1") return;
+  const answer = process.env.FAKE_CLAUDE_NATIVE_EMPTY === "1" ? "" : extra.native_answer ?? extra.last_assistant_message ?? "";
   const reason = process.env.FAKE_CLAUDE_NATIVE_REASON || "answer";
-  nativeEvent("turn.complete", { reason, is_aborted: reason === "aborted", agent_id: null,
-    answer,
-    answer_truncated: raw.length > 64000,
-    stop: { blocked: process.env.FAKE_CLAUDE_STOP_BLOCKED === "1", prevent_continuation: process.env.FAKE_CLAUDE_PREVENT === "1",
-      background_tasks_pending: process.env.FAKE_CLAUDE_BACKGROUND_PENDING === "unknown" ? null : process.env.FAKE_CLAUDE_BACKGROUND_PENDING === "1" ? 1 : extra.background_tasks?.length || 0,
-      session_crons_pending: process.env.FAKE_CLAUDE_CRON_PENDING === "1" ? 1 : extra.session_crons?.length || 0 },
-    last_api_model: "fake-model", observed: { model: "fake-model", effort: "medium" } });
+  const turnId = nativeTurnId;
+  nativeQueue = nativeQueue.then(async (observer) => {
+    await observer.call("classic.Stop", {
+      background_tasks: process.env.FAKE_CLAUDE_BACKGROUND_PENDING === "unknown" ? undefined : process.env.FAKE_CLAUDE_BACKGROUND_PENDING === "1" ? [{}] : extra.background_tasks || [],
+      session_crons: process.env.FAKE_CLAUDE_CRON_PENDING === "1" ? [{}] : extra.session_crons || [],
+    }, async () => ({ block: process.env.FAKE_CLAUDE_STOP_BLOCKED === "1" ? "blocked" : undefined, preventContinuation: process.env.FAKE_CLAUDE_PREVENT === "1" }));
+    await observer.call("turn.complete", { reason, isAborted: reason === "aborted", turnId, answer, usage: { model: "fake-model" } });
+    return observer;
+  });
 }
 function emitHook(eventName, extra) {
+  if (eventName === "StopFailure") {
+    nativeQueue = nativeQueue.then(async (observer) => {
+      const eventFile = observer.writes.at(-1)?.file;
+      const deadline = Date.now() + 2000;
+      while (eventFile && fs.existsSync(eventFile) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      runHook(eventName, extra);
+      return observer;
+    });
+    return;
+  }
   runHook(eventName, extra);
   if (eventName === "SessionStart") nativeEvent("ready", { version: { version: "2.1.322" } });
   if (eventName === "UserPromptSubmit") {
@@ -300,7 +320,10 @@ process.stdin.on("data", (data) => {
       if (inputBuffer.includes("1. CODEX_CLAUDE_SUBAGENT_DONE_") && suffix) {
         console.log("CODEX_CLAUDE_SUBAGENT_DONE_" + suffix);
       }
-      emitHook("Stop", { last_assistant_message: "review complete" });
+      emitHook("Stop", {
+        last_assistant_message: "review complete",
+        ...(process.env.FAKE_CLAUDE_NATIVE_ANSWER === undefined ? {} : { native_answer: process.env.FAKE_CLAUDE_NATIVE_ANSWER }),
+      });
     }, 100);
   }
   if (!neverHandled && hasSubmittedText("never marker")) {
@@ -486,74 +509,16 @@ process.stdout.write(Buffer.alloc(1024 * 1024, 79), () => {
 );
 
 function parseToolResult(result) {
-  return JSON.parse(result.content[0].text);
+  const text = result.content[0].text;
+  try {
+    return JSON.parse(text);
+  } catch (cause) {
+    throw new Error(`Tool result is not JSON: ${text}`, { cause });
+  }
 }
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
-}
-
-// Run the production pure projection against frozen, aliased canonical data.
-// Integration tests below cover the actual MCP serialization and registry.
-{
-  const source = fs.readFileSync(new URL("../server.mjs", import.meta.url), "utf8");
-  const project = vm.runInNewContext(
-    source.slice(source.indexOf("function projectPublicResponse("), source.indexOf("function textResult(")) +
-      "\nprojectPublicResponse",
-  );
-  const event = Object.freeze({
-    answer: "projection sentinel",
-    last_assistant_message: "projection sentinel",
-    answer_truncated: true,
-    last_assistant_message_truncated: true,
-    notification_type: "permission_prompt",
-  });
-  const wait = Object.freeze({ reason: "hook", matched_hook: event });
-  const request = Object.freeze({ result_text: "projection sentinel", completion_event: event, last_wait: wait, wait });
-  const canonical = Object.freeze({
-    request,
-    last_request: request,
-    active_request: null,
-    wait,
-    last_hook_event: event,
-    latest_native_outcome: Object.freeze({ answer: "projection sentinel" }),
-  });
-  const before = JSON.stringify(canonical);
-  const view = project(canonical);
-  assert(canonical.wait === canonical.request.last_wait, "canonical wait alias was lost");
-  assert(JSON.stringify(canonical) === before, "public projection mutated canonical state");
-  assert(view.request !== request && view.request.last_wait !== wait, "projection reused canonical request/wait");
-  for (const projectedEvent of [
-    view.request.completion_event,
-    view.request.last_wait.matched_hook,
-    view.request.wait.matched_hook,
-    view.wait.matched_hook,
-  ]) {
-    assert(
-      !Object.hasOwn(projectedEvent, "answer") && !Object.hasOwn(projectedEvent, "last_assistant_message"),
-      "duplicate event text remained",
-    );
-    assert(
-      projectedEvent.answer_truncated &&
-        projectedEvent.last_assistant_message_truncated &&
-        projectedEvent.notification_type === "permission_prompt",
-      "projection removed event metadata",
-    );
-  }
-  assert(!Object.hasOwn(view.last_hook_event, "last_assistant_message"), "session duplicate remained");
-  assert(!Object.hasOwn(view.latest_native_outcome, "answer_truncated"), "legacy truncation became false");
-  for (const result_text of [null, "different text"]) {
-    const unique = project({ request: { ...request, result_text }, last_hook_event: event });
-    assert(unique.request.completion_event.answer === event.answer, "unique answer was deleted");
-    assert(
-      unique.request.last_wait.matched_hook.last_assistant_message === event.last_assistant_message,
-      "unique wait diagnostic was deleted",
-    );
-    assert(
-      unique.last_hook_event.last_assistant_message === event.last_assistant_message,
-      "unmatched session diagnostic was deleted",
-    );
-  }
 }
 
 async function waitForFile(filePath, timeoutMs = 2000) {
@@ -572,12 +537,64 @@ async function waitForCondition(predicate, timeoutMs = 2000) {
   }
 }
 
+async function stopFailureChecks(client, interactiveStart, cwd) {
+  const hookFailure = parseToolResult(
+    await client.callTool({
+      name: "claude_interactive_request",
+      arguments: {
+        cwd,
+        interactive_id: interactiveStart.interactive_id,
+        text: "hook failure request",
+        idle_ms: null,
+        timeout_ms: 3000,
+      },
+    }),
+  );
+  assert(hookFailure.request.wait.reason === "hook", `StopFailure request returned ${hookFailure.request.wait.reason}`);
+  assert(
+    hookFailure.request.status === "failed" && hookFailure.request.done === false,
+    "StopFailure did not produce a failed terminal request",
+  );
+  assert(
+    hookFailure.request.terminal_state === "stop_failure:rate_limit",
+    `unexpected StopFailure state ${hookFailure.request.terminal_state}`,
+  );
+  assert(hookFailure.request.result_text === "rate limited", "StopFailure result text was not preserved");
+  assert(hookFailure.request.full_answer === null, "StopFailure claimed a native full answer");
+  assert(
+    hookFailure.request.wait_required === false && hookFailure.request.next_action === null,
+    "terminal StopFailure incorrectly requested another wait",
+  );
+  assert(hookFailure.active_request === null, "StopFailure did not release the active request lock");
+
+  const delayedHookFailure = parseToolResult(
+    await client.callTool({
+      name: "claude_interactive_request",
+      arguments: {
+        cwd,
+        interactive_id: interactiveStart.interactive_id,
+        text: "delayed hook failure request",
+        idle_ms: null,
+        timeout_ms: 3000,
+      },
+    }),
+  );
+  assert(delayedHookFailure.request.wait.reason === "hook", "marker grace did not wait for delayed StopFailure");
+  assert(delayedHookFailure.request.marker_seen === true, "delayed StopFailure test did not observe the marker first");
+  assert(delayedHookFailure.request.status === "failed", "delayed StopFailure was misclassified as success");
+  assert(
+    delayedHookFailure.request.terminal_state === "stop_failure:delayed_rate_limit",
+    `unexpected delayed StopFailure state ${delayedHookFailure.request.terminal_state}`,
+  );
+  return { hookFailure, delayedHookFailure };
+}
+
 const activeClients = new Set();
 function createTestClient(testStateDir, extraEnv = {}) {
   const testClient = new Client({ name: "codex-claude-subagent-test", version: "0.0.0" });
   const testTransport = new StdioClientTransport({
     command: "node",
-    args: ["server.bundle.mjs"],
+    args: [process.env.CODEX_CLAUDE_SUBAGENT_TEST_SOURCE === "1" ? "server.mjs" : "server.bundle.mjs"],
     cwd: process.cwd(),
     env: {
       ...process.env,
@@ -637,6 +654,41 @@ process.on("uncaughtException", handleFatalError);
 process.on("unhandledRejection", handleFatalError);
 
 await client.connect(transport);
+
+if (process.argv.includes("--only=stop-failure")) {
+  const repetitions = Number(process.argv.find((arg) => arg.startsWith("--repeat="))?.slice(9) ?? 20);
+  assert(
+    Number.isSafeInteger(repetitions) && repetitions > 0 && repetitions <= 100,
+    "repeat must be between 1 and 100",
+  );
+  try {
+    for (let iteration = 0; iteration < repetitions; iteration += 1) {
+      const started = parseToolResult(
+        await client.callTool({
+          name: "claude_interactive_start",
+          arguments: { cwd: plainProjectDir, role: "reviewer", mcp_preset: "none" },
+        }),
+      );
+      assert(started.status === "running", "StopFailure fixture did not start");
+      try {
+        await stopFailureChecks(client, started, plainProjectDir);
+      } finally {
+        const stopped = parseToolResult(
+          await client.callTool({
+            name: "claude_interactive_stop",
+            arguments: { cwd: plainProjectDir, interactive_id: started.interactive_id },
+          }),
+        );
+        assert(stopped.stop.exited === true, "StopFailure fixture did not stop");
+      }
+      console.log(JSON.stringify({ test: "StopFailure", iteration: iteration + 1, ok: true }));
+    }
+  } finally {
+    await client.close();
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  }
+  process.exit(0);
+}
 
 const info = parseToolResult(await client.callTool({ name: "codex_claude_subagent_info", arguments: {} }));
 const manifestVersion = JSON.parse(
@@ -735,6 +787,7 @@ for (const expected of [
   "claude_interactive_wait",
   "claude_interactive_read",
   "claude_interactive_read_log",
+  "claude_interactive_read_answer",
   "claude_interactive_list",
   "claude_interactive_saved_sessions",
   "claude_interactive_stop",
@@ -1134,6 +1187,8 @@ for (const mode of [
   "background",
   "unknown-count",
   "empty-answer",
+  "stored-different",
+  "stored-prefix",
   "unknown-reason",
   "blocked",
   "cron",
@@ -1144,7 +1199,8 @@ for (const mode of [
   "prevent",
 ]) {
   const inputFile = path.join(tmpRoot, `unexpected-input-${mode}`);
-  const isolated = createTestClient(path.join(tmpRoot, `state-lifecycle-${mode}`), {
+  const lifecycleState = path.join(tmpRoot, `state-lifecycle-${mode}`);
+  const isolated = createTestClient(lifecycleState, {
     ...(mode === "trust" || mode === "bypass"
       ? { FAKE_CLAUDE_STARTUP_DIALOG: mode, FAKE_CLAUDE_UNEXPECTED_INPUT: inputFile }
       : {}),
@@ -1154,6 +1210,8 @@ for (const mode of [
     ...(mode === "background" ? { FAKE_CLAUDE_BACKGROUND_PENDING: "1" } : {}),
     ...(mode === "unknown-count" ? { FAKE_CLAUDE_BACKGROUND_PENDING: "unknown" } : {}),
     ...(mode === "empty-answer" ? { FAKE_CLAUDE_NATIVE_EMPTY: "1" } : {}),
+    ...(mode === "stored-different" ? { FAKE_CLAUDE_NATIVE_ANSWER: "review completE" } : {}),
+    ...(mode === "stored-prefix" ? { FAKE_CLAUDE_NATIVE_ANSWER: "review complete plus native tail" } : {}),
     ...(mode === "unknown-reason" ? { FAKE_CLAUDE_NATIVE_REASON: "unrecognized" } : {}),
     ...(mode === "blocked" ? { FAKE_CLAUDE_STOP_BLOCKED: "1" } : {}),
     ...(mode === "tokenless" ? { FAKE_CLAUDE_TOKENLESS_WAKE: "1" } : {}),
@@ -1216,11 +1274,11 @@ for (const mode of [
     } else if (mode === "empty-answer") {
       assert(response.request.done && response.request.status === "completed", "empty answer changed completion");
       assert(
-        response.request.result_text === null && response.latest_native_outcome.answer === null,
+        response.request.result_text === null && !Object.hasOwn(response.latest_native_outcome, "answer"),
         "no captured text was not null",
       );
       assert(
-        response.latest_native_outcome.answer_truncated === false && response.request.result_text_truncated === false,
+        response.request.result_text_truncated === false && response.request.full_answer.status === "empty",
         "empty answer was reported truncated",
       );
       const emptyView = parseToolResult(
@@ -1230,7 +1288,7 @@ for (const mode of [
         }),
       );
       assert(
-        emptyView.last_request.result_text === null && emptyView.latest_native_outcome.answer === null,
+        !Object.hasOwn(emptyView.last_request, "result_text") && emptyView.latest_native_outcome.answer === null,
         "read changed null answer semantics",
       );
     } else if (mode === "unknown-reason") {
@@ -1296,8 +1354,13 @@ for (const mode of [
       );
       assert(
         view.last_request.request_id === response.request.request_id &&
-          view.last_request.result_text === "review complete",
+          view.last_request.full_answer.ref === response.request.full_answer.ref,
         "tokenless completion changed correlated request",
+      );
+      assert(
+        view.last_hook_event?.answer_ref === view.last_request.full_answer.ref &&
+          view.last_hook_event.answer_ref !== view.latest_native_outcome.full_answer.ref,
+        "tokenless wake rebound the earlier Stop to the latest outcome",
       );
       const unlocked = await isolated.client.callTool({
         name: "claude_interactive_send",
@@ -1314,6 +1377,50 @@ for (const mode of [
         response.request.done && response.request.completion_transport === "claude_code_mod",
         `${mode} native completion failed`,
       );
+    }
+    if (["empty-answer", "stored-different", "stored-prefix"].includes(mode)) {
+      const stopText = "review complete";
+      const status = mode === "empty-answer" ? "empty" : "stored";
+      assert(response.request.full_answer.status === status, `${mode}: unexpected capture status`);
+      if (mode === "stored-different")
+        assert(
+          response.request.result_text !== stopText &&
+            Buffer.byteLength(response.request.result_text) === Buffer.byteLength(stopText),
+          "different Stop fixture did not use distinct same-length native text",
+        );
+      if (mode === "stored-prefix")
+        assert(
+          response.request.result_text.startsWith(stopText) && response.request.result_text.length > stopText.length,
+          "prefix Stop fixture did not use a strict native-answer prefix",
+        );
+      const read = parseToolResult(
+        await isolated.client.callTool({
+          name: "claude_interactive_read",
+          arguments: { cwd: plainProjectDir, interactive_id: started.interactive_id },
+        }),
+      );
+      const listed = parseToolResult(
+        await isolated.client.callTool({ name: "claude_interactive_list", arguments: { cwd: plainProjectDir } }),
+      ).sessions.find((session) => session.interactive_id === started.interactive_id);
+      const stored = () =>
+        JSON.parse(fs.readFileSync(path.join(lifecycleState, "interactive-sessions.json"), "utf8")).sessions.find(
+          (session) => session.interactive_id === started.interactive_id,
+        );
+      await waitForCondition(() => stored()?.last_request?.full_answer?.status === status, 3000);
+      for (const [surface, view] of [
+        ["read", read],
+        ["list", listed],
+        ["registry", stored()],
+      ]) {
+        assert(view.latest_native_outcome.full_answer.status === status, `${mode}/${surface}: descriptor changed`);
+        assert(
+          view.last_hook_event?.hook_event_name === "Stop" &&
+            view.last_hook_event.last_assistant_message === stopText &&
+            view.last_hook_event.last_assistant_message_truncated !== true &&
+            !Object.hasOwn(view.last_hook_event, "answer_ref"),
+          `${mode}/${surface}: unmatched or unstored Stop text was released`,
+        );
+      }
     }
   }
   await isolated.client.callTool({
@@ -1396,20 +1503,25 @@ for (const mode of [
       }
     };
     walk(view);
-    const expected = [
-      "last_request.result_text",
-      "latest_native_outcome.answer",
-      ...(withRequest ? ["request.result_text"] : []),
-    ];
+    const boundedList = surface.includes("list") || surface.includes("saved_sessions");
+    const expected = boundedList ? [] : [withRequest ? "request.result_text" : "latest_native_outcome.answer"];
     assert(
       JSON.stringify(paths.sort()) === JSON.stringify(expected.sort()),
       `${surface}: unexpected sentinel paths ${JSON.stringify(paths)}`,
     );
     assert(
-      view.last_request.result_text === sentinel && (!withRequest || view.request.result_text === sentinel),
+      !Object.hasOwn(view.last_request, "result_text") && (!withRequest || view.request.result_text === sentinel),
       `${surface}: canonical result_text changed`,
     );
-    assert(view.latest_native_outcome.answer_truncated === false, `${surface}: native truncation flag missing`);
+    assert(view.latest_native_outcome.full_answer.status === "stored", `${surface}: answer descriptor missing`);
+    assert(
+      view.last_hook_event?.hook_event_name === "Stop" &&
+        !Object.hasOwn(view.last_hook_event, "last_assistant_message") &&
+        view.last_hook_event.answer_ref === view.latest_native_outcome.full_answer.ref,
+      `${surface}: matching Stop was not replaced by its stored answer reference`,
+    );
+    if (!boundedList && !withRequest)
+      assert(view.latest_native_outcome.answer_truncated === false, `${surface}: native truncation flag missing`);
   };
   assertTextPaths(response, true, "request");
   assertTextPaths(
@@ -1430,7 +1542,7 @@ for (const mode of [
     JSON.parse(fs.readFileSync(registryFile, "utf8")).sessions.find(
       (session) => session.interactive_id === started.interactive_id,
     );
-  await waitForCondition(() => storedSession()?.last_request?.result_text === sentinel, 3000);
+  await waitForCondition(() => storedSession()?.last_request?.full_answer?.status === "stored", 3000);
   const reader = createTestClient(integrityState);
   await reader.client.connect(reader.transport);
   const readCall = async (name, args = {}) =>
@@ -1448,13 +1560,13 @@ for (const mode of [
     "second process saved_sessions",
   );
   assertTextPaths(sessionFrom(await call("claude_interactive_saved_sessions")), false, "owner saved_sessions");
+  assert(!fs.readFileSync(registryFile, "utf8").includes(sentinel), "new registry persisted answer body");
+  const storedHook = storedSession().last_hook_event;
   assert(
-    storedSession().last_request.completion_event.last_assistant_message === sentinel,
-    "public projection stripped canonical registry event body",
-  );
-  assert(
-    storedSession().last_request.last_wait.matched_hook.answer === sentinel,
-    "public projection stripped canonical wait body",
+    storedHook.hook_event_name === "Stop" &&
+      !Object.hasOwn(storedHook, "last_assistant_message") &&
+      storedHook.answer_ref === storedSession().latest_native_outcome.full_answer.ref,
+    "registry: matching Stop was not replaced by its stored answer reference",
   );
 
   // A manual-send failure has no new correlated request. Its unique diagnostic
@@ -1473,7 +1585,7 @@ for (const mode of [
         view.last_hook_event.last_assistant_message === "rate limited",
       `${surface}: unique manual-send failure disappeared`,
     );
-    for (const field of ["result_text", "status", "done", "terminal_state"]) {
+    for (const field of ["status", "done", "terminal_state"]) {
       assert(
         view.last_request[field] === response.request[field],
         `${surface}: manual failure changed previous ${field}`,
@@ -1490,9 +1602,12 @@ for (const mode of [
   assertManualFailure(sessionFrom(await readCall("claude_interactive_saved_sessions")), "saved manual failure");
   await isolated.client.close();
   activeClients.delete(isolated.client);
-  // Simulate an older canonical registry without the additive native flag.
   const legacyRegistry = JSON.parse(fs.readFileSync(registryFile, "utf8"));
   const legacySession = sessionFrom(legacyRegistry);
+  delete legacySession.latest_native_outcome.full_answer;
+  delete legacySession.last_request.full_answer;
+  legacySession.latest_native_outcome.answer = sentinel;
+  legacySession.last_request.result_text = sentinel;
   delete legacySession.latest_native_outcome.answer_truncated;
   fs.writeFileSync(registryFile, JSON.stringify(legacyRegistry));
   for (const name of ["claude_interactive_read", "claude_interactive_list", "claude_interactive_saved_sessions"]) {
@@ -1500,6 +1615,12 @@ for (const mode of [
     const view = result.sessions ? sessionFrom(result) : result;
     assert(!Object.hasOwn(view.latest_native_outcome, "answer_truncated"), `${name}: legacy unknown flag became false`);
     assert(view.last_request.result_text === sentinel, `${name}: legacy reader lost result_text`);
+    assert(view.last_request.full_answer.status === "legacy", `${name}: legacy descriptor missing`);
+    deepStrictEqual(
+      JSON.parse(fs.readFileSync(registryFile, "utf8")),
+      legacyRegistry,
+      `${name}: legacy registry changed`,
+    );
   }
   await reader.client.close();
   activeClients.delete(reader.client);
@@ -1539,7 +1660,7 @@ let unsafeToolResult;
     fs.writeFileSync(
       path.join(meta.directory, `event-${String(seq).padStart(8, "0")}.json`),
       JSON.stringify({
-        schema: 1,
+        schema: 2,
         seq,
         generation: meta.generation,
         session_id: meta.session_id,
@@ -1569,10 +1690,10 @@ let unsafeToolResult;
   event(3, "turn.complete", {
     reason: "answer",
     is_aborted: false,
-    answer: "background complete",
+    answer_capture: { kind: "empty" },
     stop: { background_tasks_pending: 0 },
   });
-  fs.writeFileSync(path.join(meta.directory, "event-00000004.json"), '{"schema":1');
+  fs.writeFileSync(path.join(meta.directory, "event-00000004.json"), '{"schema":2');
   assert((await retry()).isError, "retry_submit accepted incomplete observer state");
   await new Promise((resolve) => setTimeout(resolve, 50));
   assert(fs.readFileSync(inputLog, "utf8") === before, "retry_submit wrote Enter with a partial observer record");
@@ -2270,53 +2391,7 @@ assert(
 assert(retriedSubmit.request.done === true, "Enter-only retry did not complete the pending request");
 assert(retriedSubmit.request.result_text === "retry submit complete", "Enter-only retry lost the hook result");
 
-const hookFailure = parseToolResult(
-  await client.callTool({
-    name: "claude_interactive_request",
-    arguments: {
-      cwd: plainProjectDir,
-      interactive_id: interactiveStart.interactive_id,
-      text: "hook failure request",
-      idle_ms: null,
-      timeout_ms: 3000,
-    },
-  }),
-);
-assert(hookFailure.request.wait.reason === "hook", `StopFailure request returned ${hookFailure.request.wait.reason}`);
-assert(
-  hookFailure.request.status === "failed" && hookFailure.request.done === false,
-  "StopFailure did not produce a failed terminal request",
-);
-assert(
-  hookFailure.request.terminal_state === "stop_failure:rate_limit",
-  `unexpected StopFailure state ${hookFailure.request.terminal_state}`,
-);
-assert(hookFailure.request.result_text === "rate limited", "StopFailure result text was not preserved");
-assert(
-  hookFailure.request.wait_required === false && hookFailure.request.next_action === null,
-  "terminal StopFailure incorrectly requested another wait",
-);
-assert(hookFailure.active_request === null, "StopFailure did not release the active request lock");
-
-const delayedHookFailure = parseToolResult(
-  await client.callTool({
-    name: "claude_interactive_request",
-    arguments: {
-      cwd: plainProjectDir,
-      interactive_id: interactiveStart.interactive_id,
-      text: "delayed hook failure request",
-      idle_ms: null,
-      timeout_ms: 3000,
-    },
-  }),
-);
-assert(delayedHookFailure.request.wait.reason === "hook", "marker grace did not wait for delayed StopFailure");
-assert(delayedHookFailure.request.marker_seen === true, "delayed StopFailure test did not observe the marker first");
-assert(delayedHookFailure.request.status === "failed", "delayed StopFailure was misclassified as success");
-assert(
-  delayedHookFailure.request.terminal_state === "stop_failure:delayed_rate_limit",
-  `unexpected delayed StopFailure state ${delayedHookFailure.request.terminal_state}`,
-);
+const { delayedHookFailure } = await stopFailureChecks(client, interactiveStart, plainProjectDir);
 
 const noOutputWait = parseToolResult(
   await client.callTool({
@@ -2579,17 +2654,38 @@ assert(longHookResult.request.done === true, "long hook result request did not c
 assert(longHookResult.request.result_text_truncated === true, "long hook result did not report truncation");
 assert(longHookResult.request.result_text.startsWith("RESULT_BEGIN_"), "long hook result lost its prefix");
 assert(
-  longHookResult.request.result_text.includes(
-    "[codex-claude-subagent: native answer truncated to at most 64,000 UTF-16 code units; the rest is not in this field and may or may not be in the terminal log]",
-  ),
-  "long hook result lacked a truncation marker",
+  longHookResult.request.result_text === ("RESULT_BEGIN_" + "🙂".repeat(40000) + "_RESULT_END").slice(0, 63999),
+  "long hook preview was not the exact surrogate-safe prefix",
 );
 assert(!longHookResult.request.result_text.includes("�"), "long hook result split a Unicode character");
-assert(longHookResult.latest_native_outcome.answer_truncated === true, "session native outcome lost truncation flag");
+assert(!Object.hasOwn(longHookResult.latest_native_outcome, "answer"), "request envelope duplicated its answer");
 assert(
-  longHookResult.latest_native_outcome.answer === longHookResult.request.result_text,
-  "session native outcome re-sliced the clipped answer or marker",
+  longHookResult.latest_native_outcome.full_answer.ref === longHookResult.request.full_answer.ref,
+  "session native outcome lost its canonical answer reference",
 );
+const assertLongHookPaths = (view, expected, surface) => {
+  const paths = [];
+  const walk = (value, at = "") => {
+    if (typeof value === "string") {
+      if (value.includes("RESULT_BEGIN_")) paths.push(at);
+    } else if (value && typeof value === "object") {
+      for (const [key, child] of Object.entries(value)) {
+        if (!["output_tail", "chunks"].includes(key)) walk(child, at ? `${at}.${key}` : key);
+      }
+    }
+  };
+  walk(view);
+  deepStrictEqual(paths.sort(), expected.sort(), `${surface}: long answer escaped its canonical body path`);
+  assert(!JSON.stringify(view).includes("hook field truncated"), `${surface}: bridge truncation marker survived`);
+  assert(
+    view.last_hook_event?.hook_event_name === "Stop" &&
+      !Object.hasOwn(view.last_hook_event, "last_assistant_message") &&
+      view.last_hook_event.last_assistant_message_truncated === true &&
+      view.last_hook_event.answer_ref === longHookResult.request.full_answer.ref,
+    `${surface}: truncated Stop lost its flag or stored answer reference`,
+  );
+};
+assertLongHookPaths(longHookResult, ["request.result_text"], "long request");
 for (const name of ["claude_interactive_read", "claude_interactive_saved_sessions"]) {
   const result = parseToolResult(
     await client.callTool({
@@ -2603,17 +2699,35 @@ for (const name of ["claude_interactive_read", "claude_interactive_saved_session
   const view = result.sessions
     ? result.sessions.find((session) => session.interactive_id === interactiveStart.interactive_id)
     : result;
+  if (name === "claude_interactive_read")
+    assert(
+      view.latest_native_outcome.answer === longHookResult.request.result_text &&
+        view.latest_native_outcome.answer_truncated,
+      "read lost long preview",
+    );
+  else assert(!Object.hasOwn(view.latest_native_outcome, "answer"), "saved_sessions included answer body");
   assert(
-    view.latest_native_outcome.answer_truncated === true &&
-      view.latest_native_outcome.answer === longHookResult.request.result_text,
-    `${name}: long native answer marker/flag lost`,
+    !Object.hasOwn(view.last_request, "result_text") &&
+      view.last_request.full_answer.ref === longHookResult.request.full_answer.ref,
+    `${name}: long request descriptor lost`,
   );
-  assert(
-    view.last_request.result_text_truncated === true &&
-      view.last_request.result_text === longHookResult.request.result_text,
-    `${name}: long request answer marker/flag lost`,
-  );
+  assertLongHookPaths(view, name === "claude_interactive_read" ? ["latest_native_outcome.answer"] : [], name);
 }
+const longRegistryFile = path.join(stateDir, "interactive-sessions.json");
+const longStoredSession = () =>
+  JSON.parse(fs.readFileSync(longRegistryFile, "utf8")).sessions.find(
+    (session) => session.interactive_id === interactiveStart.interactive_id,
+  );
+await waitForCondition(
+  () => longStoredSession()?.last_request?.full_answer?.ref === longHookResult.request.full_answer.ref,
+  3000,
+);
+assertLongHookPaths(longStoredSession(), [], "long registry");
+assert(!fs.readFileSync(longRegistryFile, "utf8").includes("RESULT_BEGIN_"), "registry retained long answer body");
+assert(
+  !fs.readFileSync(longRegistryFile, "utf8").includes("hook field truncated"),
+  "registry retained bridge truncation marker",
+);
 
 const firstSeq = utf8Visible.next_seq;
 const interactiveSend = parseToolResult(

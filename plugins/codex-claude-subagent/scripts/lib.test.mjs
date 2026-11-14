@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 
 import { createSessionRegistrySupport } from "../lib/session-registry.mjs";
+import { readAnswerParts, removeObserverRecord, observerResidualBytes } from "../lib/observer.mjs";
+import strictAssert from "node:assert/strict";
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -48,6 +50,35 @@ try {
   const result = await support.withLock(() => "acquired");
   clearTimeout(releaseTimer);
   assert(result === "acquired", "asynchronous registry lock was not acquired");
+
+  const partsDir = path.join(tempRoot, "observer-parts");
+  fs.mkdirSync(partsDir);
+  const first = path.join(partsDir, "answer-00000001-0001.txt");
+  const second = path.join(partsDir, "answer-00000001-0002.txt");
+  const event = path.join(partsDir, "event-00000001.json");
+  const unrelated = path.join(partsDir, "event-00000002.json");
+  fs.writeFileSync(first, "日本語🙂");
+  fs.writeFileSync(second, "TAIL_終");
+  fs.writeFileSync(event, "{}");
+  fs.writeFileSync(unrelated, "{}");
+  strictAssert.equal(readAnswerParts(partsDir, 1, 2).toString("utf8"), "日本語🙂TAIL_終");
+  strictAssert.equal(observerResidualBytes(partsDir), Buffer.byteLength("日本語🙂TAIL_終{}{}"));
+  for (const count of [0, -1, 10000, 1.5]) strictAssert.throws(() => readAnswerParts(partsDir, 1, count));
+  fs.rmSync(second);
+  strictAssert.throws(() => readAnswerParts(partsDir, 1, 2));
+  const outside = path.join(tempRoot, "outside-part");
+  fs.writeFileSync(outside, "OUTSIDE");
+  fs.symlinkSync(outside, second);
+  strictAssert.throws(() => readAnswerParts(partsDir, 1, 2));
+  strictAssert.equal(fs.readFileSync(outside, "utf8"), "OUTSIDE");
+  removeObserverRecord(partsDir, 1);
+  strictAssert(!fs.existsSync(first) && !fs.existsSync(second) && !fs.existsSync(event));
+  strictAssert(fs.existsSync(unrelated));
+  strictAssert.equal(observerResidualBytes(partsDir), 2);
+  const linkedDir = path.join(tempRoot, "linked-observer");
+  fs.symlinkSync(partsDir, linkedDir);
+  strictAssert.throws(() => readAnswerParts(linkedDir, 2, 1));
+  strictAssert.equal(observerResidualBytes(linkedDir), 0);
 
   console.log("codex-claude-subagent library tests passed");
 } finally {
